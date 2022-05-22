@@ -1,47 +1,32 @@
-use vulkano::buffer::TypedBufferAccess;
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
+use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, SubpassContents,
 };
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
-use vulkano::device::physical::QueueFamily;
-use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
-use vulkano::device::DeviceExtensions;
-use vulkano::device::Queue;
-use vulkano::device::{Device, DeviceCreateInfo, QueueCreateInfo};
-use vulkano::format::ClearValue;
-use vulkano::format::Format;
-use vulkano::image::ImageUsage;
-use vulkano::image::{view::ImageView, ImageDimensions, StorageImage, SwapchainImage};
+use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType, QueueFamily};
+use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
+use vulkano::image::{view::ImageView, ImageUsage, SwapchainImage};
 use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
-use vulkano::pipeline::ComputePipeline;
 use vulkano::pipeline::GraphicsPipeline;
-use vulkano::pipeline::Pipeline;
-use vulkano::pipeline::PipelineBindPoint;
-use vulkano::render_pass::RenderPass;
-use vulkano::render_pass::Subpass;
-use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo};
+use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
 use vulkano::shader::ShaderModule;
-use vulkano::swapchain::Surface;
-use vulkano::swapchain::{AcquireError, Swapchain, SwapchainCreateInfo, SwapchainCreationError};
-use vulkano::sync::FenceSignalFuture;
-use vulkano::sync::{self, FlushError, GpuFuture};
+use vulkano::swapchain::{
+    AcquireError, Surface, Swapchain, SwapchainCreateInfo, SwapchainCreationError,
+};
+use vulkano::sync::{self, FenceSignalFuture, FlushError, GpuFuture};
 
 use vulkano_win::VkSurfaceBuild;
 
 use winit::window::Window;
 
 use winit::event::{Event, WindowEvent};
-use winit::event_loop::ControlFlow;
-use winit::event_loop::EventLoop;
+use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
 use std::sync::Arc;
-
-use image::{ImageBuffer, Rgba};
 
 use bytemuck::{Pod, Zeroable};
 
@@ -238,19 +223,6 @@ fn main() {
 
     let render_pass = get_render_pass(device.clone(), swapchain.clone());
 
-    let image = StorageImage::new(
-        device.clone(),
-        ImageDimensions::Dim2d {
-            width: 1024,
-            height: 1024,
-            array_layers: 1, // images can be arrays of layers
-        },
-        Format::R8G8B8A8_UNORM,
-        Some(queue.family()),
-    )
-    .unwrap();
-
-    let view = ImageView::new_default(image.clone()).unwrap();
     let framebuffers = get_framebuffers(&images, render_pass.clone());
 
     let vertex1 = Vertex {
