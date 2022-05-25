@@ -41,9 +41,10 @@ use std::time::{Duration, Instant};
 #[derive(Default, Copy, Clone, Zeroable, Pod)]
 struct Vertex {
     position: [f32; 3],
+    normal: [f32; 3],
 }
 
-vulkano::impl_vertex!(Vertex, position);
+vulkano::impl_vertex!(Vertex, position, normal);
 
 fn get_framebuffers(
     images: &[Arc<SwapchainImage<Window>>],
@@ -163,7 +164,7 @@ fn get_command_buffers(
 }
 
 fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> Matrix4<f32> {
-    let rotation = Matrix4::from_euler_angles(0f32, 0f32, dt.as_millis() as f32 * 0.001);
+    let rotation = Matrix4::from_euler_angles(0f32, 0f32, dt.as_millis() as f32 * 0.003);
 
     let model_e: Matrix4<f32> =
         rotation * Matrix4::<f32>::new_translation(&Vector3::new(0f32, 0f32, 0f32));
@@ -254,34 +255,18 @@ fn main() {
 
     let vertices = vec![
         Vertex {
-            position: [-0.8, -0.8, 0.0],
+            position: [-0.8, -0.7, 0.0],
+            normal: [0.0, 0.0, 1.0],
         },
         Vertex {
-            position: [0.0, 0.8, 0.0],
+            position: [0.0, 0.7, 0.0],
+            normal: [0.0, 0.0, 0.0],
         },
         Vertex {
-            position: [0.8, -0.8, 0.0],
+            position: [0.8, -0.7, 0.0],
+            normal: [0.0, 0.0, 0.5],
         },
     ];
-
-    // let mvp_matrix = get_mvp(dimensions, Duration::new(0, 0));
-
-    // let mut vert_copy = vertices.clone();
-
-    // for mut v in vert_copy.iter_mut() {
-    //     let new_pos =
-    //         mvp_matrix.transform_vector(&Vector3::new(v.position[0], v.position[1], v.position[2]));
-
-    //     v.position = [new_pos.x, new_pos.y, new_pos.z];
-    // }
-
-    // let vertex_buffer = CpuAccessibleBuffer::from_iter(
-    //     device.clone(),
-    //     BufferUsage::vertex_buffer(),
-    //     false,
-    //     vert_copy.into_iter(),
-    // )
-    // .unwrap();
 
     mod vs {
         vulkano_shaders::shader! {
@@ -290,8 +275,12 @@ fn main() {
                             #version 450
                         
                         layout(location = 0) in vec3 position;
-                        
+                        layout(location = 1) in vec3 normal;
+            
+                        layout(location = 0) out vec3 o_normal;
+
                         void main() {
+                                    o_normal = normal;
                                     gl_Position = vec4(position, 1.0);
                         }",
         }
@@ -302,10 +291,11 @@ fn main() {
             ty: "fragment",
             src: "#version 450
                         
+                        layout(location = 0) in vec3 normal;
                         layout(location = 0) out vec4 f_color;
                         
                         void main() {
-                                    f_color = vec4(1.0, 0.0, 0.0, 1.0);
+                                    f_color = vec4(1.0, 0.0, normal.z, 1.0);
                         }",
         }
     }
@@ -318,22 +308,6 @@ fn main() {
         dimensions: surface.window().inner_size().into(),
         depth_range: 0.0..1.0,
     };
-
-    // let pipeline = get_pipeline(
-    //     device.clone(),
-    //     vs.clone(),
-    //     fs.clone(),
-    //     render_pass.clone(),
-    //     viewport.clone(),
-    // );
-
-    // let mut command_buffers = get_command_buffers(
-    //     device.clone(),
-    //     queue.clone(),
-    //     pipeline,
-    //     &framebuffers,
-    //     vertex_buffer.clone(),
-    // );
 
     let mut window_resized = false;
     let mut recreate_swapchain = false;
@@ -384,52 +358,6 @@ fn main() {
 
                     let new_framebuffers = get_framebuffers(&new_images, render_pass.clone());
                     framebuffers = new_framebuffers;
-
-                    // if window_resized {
-                    //     window_resized = false;
-
-                    //     let mut vertices_e = vertices.clone();
-
-                    //     let mvp = get_mvp(new_dimensions, dt);
-
-                    //     for mut v in vertices_e.iter_mut() {
-                    //         let new_pos = mvp.transform_vector(&Vector3::new(
-                    //             v.position[0],
-                    //             v.position[1],
-                    //             v.position[2],
-                    //         ));
-
-                    //         v.position = [new_pos.x, new_pos.y, new_pos.z];
-
-                    //         println!("Vertex: {:?}", v.position);
-                    //     }
-
-                    //     println!("");
-
-                    //     let vertex_buffer_e = CpuAccessibleBuffer::from_iter(
-                    //         device.clone(),
-                    //         BufferUsage::vertex_buffer(),
-                    //         false,
-                    //         vertices_e.into_iter(),
-                    //     )
-                    //     .unwrap();
-
-                    //     viewport.dimensions = new_dimensions.into();
-                    //     let new_pipeline = get_pipeline(
-                    //         device.clone(),
-                    //         vs.clone(),
-                    //         fs.clone(),
-                    //         render_pass.clone(),
-                    //         viewport.clone(),
-                    //     );
-                    //     command_buffers = get_command_buffers(
-                    //         device.clone(),
-                    //         queue.clone(),
-                    //         new_pipeline,
-                    //         &new_framebuffers,
-                    //         vertex_buffer_e.clone(),
-                    //     );
-                    // }
                 }
             }
 
@@ -445,11 +373,7 @@ fn main() {
                 ));
 
                 v.position = [new_pos.x, new_pos.y, new_pos.z];
-
-                // println!("Vertex: {:?}", v.position);
             }
-
-            println!("");
 
             let vertex_buffer_e = CpuAccessibleBuffer::from_iter(
                 device.clone(),
