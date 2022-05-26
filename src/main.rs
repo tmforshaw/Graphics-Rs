@@ -46,6 +46,8 @@ struct Vertex {
 
 vulkano::impl_vertex!(Vertex, position, normal);
 
+const BG_COL: [f32; 4] = [0.40, 0.40, 0.40, 1.0];
+
 fn get_framebuffers(
     images: &[Arc<SwapchainImage<Window>>],
     render_pass: Arc<RenderPass>,
@@ -133,6 +135,7 @@ fn get_command_buffers(
     pipeline: Arc<GraphicsPipeline>,
     framebuffers: &Vec<Arc<Framebuffer>>,
     vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
+    index_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers
         .iter()
@@ -148,12 +151,13 @@ fn get_command_buffers(
                 .begin_render_pass(
                     framebuffer.clone(),
                     SubpassContents::Inline,
-                    vec![[0.0, 0.0, 1.0, 1.0].into()],
+                    vec![BG_COL.into()],
                 )
                 .unwrap()
                 .bind_pipeline_graphics(pipeline.clone())
                 .bind_vertex_buffers(0, vertex_buffer.clone())
-                .draw(vertex_buffer.len() as u32, 1, 0, 0)
+                .bind_index_buffer(index_buffer.clone())
+                .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0)
                 .unwrap()
                 .end_render_pass()
                 .unwrap();
@@ -164,10 +168,10 @@ fn get_command_buffers(
 }
 
 fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> Matrix4<f32> {
-    let rotation = Matrix4::from_euler_angles(0f32, 0f32, dt.as_millis() as f32 * 0.003);
+    let rotation = Matrix4::from_euler_angles(0f32, 0f32, dt.as_millis() as f32 * 0.002);
 
     let model_e: Matrix4<f32> =
-        rotation * Matrix4::<f32>::new_translation(&Vector3::new(0f32, 0f32, 0f32));
+        rotation * Matrix4::<f32>::new_translation(&Vector3::new(0f32, 0f32, -1f32));
     let view_e = Matrix4::look_at_rh(
         &Point3::new(0f32, 0f32, 0f32),
         &Point3::new(0f32, 0f32, 1f32),
@@ -176,8 +180,8 @@ fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> Matrix4<f
     let projection_e = Matrix4::<f32>::new_perspective(
         (dimensions.width as f32) / (dimensions.height as f32),
         90f32,
-        0.25f32,
-        100f32,
+        0.05f32,
+        1000f32,
     );
 
     projection_e * view_e * model_e
@@ -255,34 +259,56 @@ fn main() {
 
     let vertices = vec![
         Vertex {
-            position: [-0.8, -0.7, 0.0],
+            position: [0.5, 0.5, 0.0],
             normal: [0.0, 0.0, 1.0],
         },
         Vertex {
-            position: [0.0, 0.7, 0.0],
-            normal: [0.0, 0.0, 0.0],
+            position: [-0.5, -0.5, 0.0],
+            normal: [0.0, 0.0, 1.0],
         },
         Vertex {
-            position: [0.8, -0.7, 0.0],
-            normal: [0.0, 0.0, 0.5],
+            position: [0.5, -0.5, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        Vertex {
+            position: [-0.5, 0.5, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        },
+        Vertex {
+            position: [0.5, 0.5, 0.5],
+            normal: [0.0, 0.0, -1.0],
+        },
+        Vertex {
+            position: [-0.5, -0.5, 0.5],
+            normal: [0.0, 0.0, -1.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, 0.5],
+            normal: [0.0, 0.0, -1.0],
+        },
+        Vertex {
+            position: [-0.5, 0.5, 0.5],
+            normal: [0.0, 0.0, -1.0],
         },
     ];
+
+    let indices: [u32; 12] = [0, 1, 2, 3, 0, 1, 4, 5, 6, 7, 5, 6];
 
     mod vs {
         vulkano_shaders::shader! {
             ty: "vertex",
             src: "
-                            #version 450
-                        
-                        layout(location = 0) in vec3 position;
-                        layout(location = 1) in vec3 normal;
+                #version 450
             
-                        layout(location = 0) out vec3 o_normal;
+                layout(location = 0) in vec3 position;
+                layout(location = 1) in vec3 normal;
 
-                        void main() {
-                                    o_normal = normal;
-                                    gl_Position = vec4(position, 1.0);
-                        }",
+                layout(location = 0) out vec3 o_normal;
+
+                void main() {
+                            o_normal = normal;
+                            gl_Position = vec4(position, 1.0);
+                }",
         }
     }
 
@@ -291,12 +317,12 @@ fn main() {
             ty: "fragment",
             src: "#version 450
                         
-                        layout(location = 0) in vec3 normal;
-                        layout(location = 0) out vec4 f_color;
-                        
-                        void main() {
-                                    f_color = vec4(1.0, 0.0, normal.z, 1.0);
-                        }",
+                layout(location = 0) in vec3 normal;
+                layout(location = 0) out vec4 f_color;
+            
+                void main() {
+                            f_color = vec4(1.0, 0.0, 0.0, 1.0);
+                }",
         }
     }
 
@@ -372,6 +398,8 @@ fn main() {
                     v.position[2],
                 ));
 
+                // println!("{:?}", new_pos);
+
                 v.position = [new_pos.x, new_pos.y, new_pos.z];
             }
 
@@ -380,6 +408,14 @@ fn main() {
                 BufferUsage::vertex_buffer(),
                 false,
                 vertices_e.into_iter(),
+            )
+            .unwrap();
+
+            let index_buffer_e = CpuAccessibleBuffer::from_iter(
+                device.clone(),
+                BufferUsage::index_buffer(),
+                false,
+                indices.clone().into_iter(),
             )
             .unwrap();
 
@@ -398,6 +434,7 @@ fn main() {
                 new_pipeline,
                 &framebuffers,
                 vertex_buffer_e.clone(),
+                index_buffer_e.clone(),
             );
 
             let (image_i, suboptimal, acquire_future) =
