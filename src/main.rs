@@ -1,11 +1,11 @@
 // #[macro_use]
-extern crate nalgebra as na;
+// extern crate nalgebra_glm as na;
 
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, TypedBufferAccess};
+use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, CpuBufferPool, TypedBufferAccess};
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, SubpassContents,
 };
-// use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
+use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType, QueueFamily};
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
 use vulkano::image::{view::ImageView, ImageUsage, SwapchainImage};
@@ -13,7 +13,7 @@ use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
-use vulkano::pipeline::GraphicsPipeline;
+use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
 use vulkano::shader::ShaderModule;
 use vulkano::swapchain::{
@@ -33,7 +33,9 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 
-use na::{Matrix4, Point3, Vector3};
+// use na::{Matrix4, Point3, Vector3};
+
+use nalgebra_glm::{identity, TMat4, TVec3};
 
 use std::time::{Duration, Instant};
 
@@ -42,6 +44,28 @@ use std::time::{Duration, Instant};
 struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Default, Clone)]
+struct MVP {
+    model: TMat4<f32>,
+    view: TMat4<f32>,
+    proj: TMat4<f32>,
+}
+
+impl MVP {
+    fn new() -> MVP {
+        MVP {
+            model: identity(),
+            view: identity(),
+            proj: identity(),
+        }
+    }
+
+    fn matrix(&self) -> TMat4<f32> {
+        self.proj * self.view * self.model
+    }
 }
 
 vulkano::impl_vertex!(Vertex, position, normal);
@@ -133,6 +157,7 @@ fn get_command_buffers(
     device: Arc<Device>,
     queue: Arc<Queue>,
     pipeline: Arc<GraphicsPipeline>,
+    set: Arc<PersistentDescriptorSet>,
     framebuffers: &Vec<Arc<Framebuffer>>,
     vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
     index_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
@@ -157,6 +182,12 @@ fn get_command_buffers(
                 .bind_pipeline_graphics(pipeline.clone())
                 .bind_vertex_buffers(0, vertex_buffer.clone())
                 .bind_index_buffer(index_buffer.clone())
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    pipeline.layout().clone(),
+                    0,
+                    set.clone(),
+                )
                 .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0)
                 .unwrap()
                 .end_render_pass()
@@ -167,24 +198,25 @@ fn get_command_buffers(
         .collect()
 }
 
-fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> Matrix4<f32> {
-    let rotation = Matrix4::from_euler_angles(0f32, 0f32, dt.as_millis() as f32 * 0.002);
+fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> MVP {
+    let rotation =
+        nalgebra_glm::rotation(dt.as_millis() as f32 * 0.002, &TVec3::new(0f32, 0f32, 1f32));
 
-    let model_e: Matrix4<f32> =
-        rotation * Matrix4::<f32>::new_translation(&Vector3::new(0f32, 0f32, -1f32));
-    let view_e = Matrix4::look_at_rh(
-        &Point3::new(0f32, 0f32, 0f32),
-        &Point3::new(0f32, 0f32, 1f32),
-        &Vector3::<f32>::new(0f32, -1f32, 0f32),
+    let model: TMat4<f32> =
+        rotation * nalgebra_glm::translation(&TVec3::new(dt.as_secs_f32().sin(), 0f32, -1f32));
+    let view = nalgebra_glm::look_at_rh(
+        &TVec3::new(0f32, 0f32, 0f32),
+        &TVec3::new(0f32, 0f32, -1f32),
+        &TVec3::<f32>::new(0f32, -1f32, 0f32),
     );
-    let projection_e = Matrix4::<f32>::new_perspective(
+    let proj = nalgebra_glm::perspective(
         (dimensions.width as f32) / (dimensions.height as f32),
         90f32,
         0.05f32,
         1000f32,
     );
 
-    projection_e * view_e * model_e
+    MVP { model, view, proj }
 }
 
 fn main() {
@@ -273,26 +305,26 @@ fn main() {
         Vertex {
             position: [-0.5, 0.5, 0.0],
             normal: [0.0, 0.0, 1.0],
-        },
-        Vertex {
-            position: [0.5, 0.5, 0.5],
-            normal: [0.0, 0.0, -1.0],
-        },
-        Vertex {
-            position: [-0.5, -0.5, 0.5],
-            normal: [0.0, 0.0, -1.0],
-        },
-        Vertex {
-            position: [0.5, -0.5, 0.5],
-            normal: [0.0, 0.0, -1.0],
-        },
-        Vertex {
-            position: [-0.5, 0.5, 0.5],
-            normal: [0.0, 0.0, -1.0],
-        },
+        }
+        // Vertex {
+        //     position: [0.5, 0.5, 0.5],
+        //     normal: [0.0, 0.0, -1.0],
+        // },
+        // Vertex {
+        //     position: [-0.5, -0.5, 0.5],
+        //     normal: [0.0, 0.0, -1.0],
+        // },
+        // Vertex {
+        //     position: [0.5, -0.5, 0.5],
+        //     normal: [0.0, 0.0, -1.0],
+        // },
+        // Vertex {
+        //     position: [-0.5, 0.5, 0.5],
+        //     normal: [0.0, 0.0, -1.0],
+        // },
     ];
 
-    let indices: [u32; 12] = [0, 1, 2, 3, 0, 1, 4, 5, 6, 7, 5, 6];
+    let indices: [u32; 6] = [0, 1, 2, 3, 0, 1]; // , 4, 5, 6, 7, 5, 6
 
     mod vs {
         vulkano_shaders::shader! {
@@ -304,11 +336,25 @@ fn main() {
                 layout(location = 1) in vec3 normal;
 
                 layout(location = 0) out vec3 o_normal;
-
+            
+                layout(set = 0, binding = 0) uniform MVP_Data {
+                    mat4 model;
+                    mat4 view;
+                    mat4 proj;
+                } uniforms;
+            
                 void main() {
                             o_normal = normal;
-                            gl_Position = vec4(position, 1.0);
+            
+                            mat4 mvp = uniforms.proj * uniforms.view * uniforms.model;
+            
+                            gl_Position = mvp * vec4(position, 1.0);
                 }",
+            types_meta: {
+                    use bytemuck::{Zeroable, Pod};
+
+                    #[derive(Clone, Copy, Zeroable, Pod)]
+                },
         }
     }
 
@@ -328,6 +374,8 @@ fn main() {
 
     let vs = vs::load(device.clone()).expect("failed to create vertex shader module");
     let fs = fs::load(device.clone()).expect("failed to create vertex shader module");
+
+    let uniform_buffer = CpuBufferPool::<vs::ty::MVP_Data>::uniform_buffer(device.clone());
 
     let mut viewport = Viewport {
         origin: [0.0, 0.0],
@@ -385,29 +433,13 @@ fn main() {
                     let new_framebuffers = get_framebuffers(&new_images, render_pass.clone());
                     framebuffers = new_framebuffers;
                 }
-            }
-
-            let mut vertices_e = vertices.clone();
-
-            let mvp = get_mvp(dimensions, time.elapsed());
-
-            for mut v in vertices_e.iter_mut() {
-                let new_pos = mvp.transform_vector(&Vector3::new(
-                    v.position[0],
-                    v.position[1],
-                    v.position[2],
-                ));
-
-                // println!("{:?}", new_pos);
-
-                v.position = [new_pos.x, new_pos.y, new_pos.z];
-            }
+            };
 
             let vertex_buffer_e = CpuAccessibleBuffer::from_iter(
                 device.clone(),
                 BufferUsage::vertex_buffer(),
                 false,
-                vertices_e.into_iter(),
+                vertices.clone().into_iter(),
             )
             .unwrap();
 
@@ -428,10 +460,32 @@ fn main() {
                 viewport.clone(),
             );
 
+            let uniform_buffer_subbuffer = {
+                let mvp = get_mvp(dimensions, time.elapsed());
+                let uniform_data = vs::ty::MVP_Data {
+                    model: mvp.model.into(),
+                    view: mvp.view.into(),
+                    proj: mvp.proj.into(),
+                };
+
+                uniform_buffer.next(uniform_data).unwrap()
+            };
+
+            let owned_pipeline = new_pipeline.clone().to_owned();
+
+            let layout = owned_pipeline.layout().set_layouts().get(0).unwrap();
+
+            let set = PersistentDescriptorSet::new(
+                layout.clone(),
+                [WriteDescriptorSet::buffer(0, uniform_buffer_subbuffer)],
+            )
+            .unwrap();
+
             let command_buffers = get_command_buffers(
                 device.clone(),
                 queue.clone(),
                 new_pipeline,
+                set,
                 &framebuffers,
                 vertex_buffer_e.clone(),
                 index_buffer_e.clone(),
