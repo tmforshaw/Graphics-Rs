@@ -1,6 +1,3 @@
-// #[macro_use]
-// extern crate nalgebra_glm as na;
-
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, CpuBufferPool, TypedBufferAccess};
 use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, SubpassContents,
@@ -8,9 +5,12 @@ use vulkano::command_buffer::{
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType, QueueFamily};
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
-use vulkano::image::{view::ImageView, ImageUsage, SwapchainImage};
+use vulkano::format::Format;
+use vulkano::image::{view::ImageView, AttachmentImage, ImageUsage, SwapchainImage};
 use vulkano::instance::{Instance, InstanceCreateInfo};
+use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
 use vulkano::pipeline::graphics::vertex_input::BuffersDefinition;
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint};
@@ -32,8 +32,6 @@ use winit::window::WindowBuilder;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-
-// use na::{Matrix4, Point3, Vector3};
 
 use nalgebra_glm::{identity, TMat4, TVec3};
 
@@ -62,10 +60,6 @@ impl MVP {
             proj: identity(),
         }
     }
-
-    fn matrix(&self) -> TMat4<f32> {
-        self.proj * self.view * self.model
-    }
 }
 
 vulkano::impl_vertex!(Vertex, position, normal);
@@ -75,6 +69,7 @@ const BG_COL: [f32; 4] = [0.40, 0.40, 0.40, 1.0];
 fn get_framebuffers(
     images: &[Arc<SwapchainImage<Window>>],
     render_pass: Arc<RenderPass>,
+    depth_buffer: Arc<ImageView<AttachmentImage>>,
 ) -> Vec<Arc<Framebuffer>> {
     images
         .iter()
@@ -83,7 +78,7 @@ fn get_framebuffers(
             Framebuffer::new(
                 render_pass.clone(),
                 FramebufferCreateInfo {
-                    attachments: vec![view],
+                    attachments: vec![view, depth_buffer.clone()],
                     ..Default::default()
                 },
             )
@@ -125,11 +120,17 @@ fn get_render_pass(device: Arc<Device>, swapchain: Arc<Swapchain<Window>>) -> Ar
                         store: Store,
                         format: swapchain.image_format(),  // set the format the same as the swapchain
                         samples: 1,
+                    },
+                    depth: {
+                        load: Clear,
+                        store: DontCare,
+                        format: Format::D16_UNORM,
+                        samples: 1,
                     }
             },
         pass: {
                 color: [color],
-                depth_stencil: {}
+                depth_stencil: {depth}
             }
     )
     .unwrap()
@@ -148,6 +149,8 @@ fn get_pipeline(
         .input_assembly_state(InputAssemblyState::new())
         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
         .fragment_shader(fs.entry_point("main").unwrap(), ())
+        .depth_stencil_state(DepthStencilState::simple_depth_test())
+        .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
         .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
         .build(device.clone())
         .unwrap()
@@ -176,7 +179,7 @@ fn get_command_buffers(
                 .begin_render_pass(
                     framebuffer.clone(),
                     SubpassContents::Inline,
-                    vec![BG_COL.into()],
+                    vec![BG_COL.into(), 1f32.into()], // Use 1f32 for depth clear to give unique colour
                 )
                 .unwrap()
                 .bind_pipeline_graphics(pipeline.clone())
@@ -199,14 +202,15 @@ fn get_command_buffers(
 }
 
 fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> MVP {
-    let rotation =
-        nalgebra_glm::rotation(dt.as_millis() as f32 * 0.002, &TVec3::new(0f32, 0f32, 1f32));
+    let rotation = nalgebra_glm::rotation(
+        dt.as_millis() as f32 * 0.002,
+        &TVec3::new(0.5f32, -0.5f32, 0.5f32),
+    );
 
-    let model: TMat4<f32> =
-        rotation * nalgebra_glm::translation(&TVec3::new(dt.as_secs_f32().sin(), 0f32, -1f32));
+    let model: TMat4<f32> = nalgebra_glm::translation(&TVec3::new(0f32, 0f32, 1f32)) * rotation;
     let view = nalgebra_glm::look_at_rh(
-        &TVec3::new(0f32, 0f32, 0f32),
         &TVec3::new(0f32, 0f32, -1f32),
+        &TVec3::new(0f32, 0f32, 1f32),
         &TVec3::<f32>::new(0f32, -1f32, 0f32),
     );
     let proj = nalgebra_glm::perspective(
@@ -217,6 +221,24 @@ fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> MVP {
     );
 
     MVP { model, view, proj }
+}
+
+fn make_square_indices(vertices: &Vec<Vertex>) -> Vec<u32> {
+    assert_eq!(vertices.len() % 4, 0);
+
+    let mut indices: Vec<u32> = Vec::new();
+
+    for i in 0..vertices.len() / 4 {
+        for j in 0..6 {
+            if j < 4 {
+                indices.push((i * 4 + j) as u32);
+            } else {
+                indices.push((i * 4 + 5 - j) as u32);
+            }
+        }
+    }
+
+    indices
 }
 
 fn main() {
@@ -287,44 +309,121 @@ fn main() {
 
     let render_pass = get_render_pass(device.clone(), swapchain.clone());
 
-    let mut framebuffers = get_framebuffers(&images, render_pass.clone());
+    let depth_buffer = ImageView::new_default(
+        AttachmentImage::transient(device.clone(), dimensions.clone().into(), Format::D16_UNORM)
+            .unwrap(),
+    )
+    .unwrap();
+
+    let mut framebuffers = get_framebuffers(&images, render_pass.clone(), depth_buffer.clone());
 
     let vertices = vec![
+        // Front Face
         Vertex {
-            position: [0.5, 0.5, 0.0],
+            position: [-0.5, 0.5, -0.5],
+            normal: [0.0, 0.0, -1.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, -0.5],
+            normal: [0.0, 0.0, -1.0],
+        },
+        Vertex {
+            position: [0.5, 0.5, -0.5],
+            normal: [0.0, 0.0, -1.0],
+        },
+        Vertex {
+            position: [-0.5, -0.5, -0.5],
+            normal: [0.0, 0.0, -1.0],
+        },
+        // Back Face
+        Vertex {
+            position: [-0.5, 0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
         },
         Vertex {
-            position: [-0.5, -0.5, 0.0],
+            position: [0.5, -0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
         },
         Vertex {
-            position: [0.5, -0.5, 0.0],
+            position: [-0.5, -0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
         },
         Vertex {
-            position: [-0.5, 0.5, 0.0],
+            position: [0.5, 0.5, 0.5],
             normal: [0.0, 0.0, 1.0],
-        }
-        // Vertex {
-        //     position: [0.5, 0.5, 0.5],
-        //     normal: [0.0, 0.0, -1.0],
-        // },
-        // Vertex {
-        //     position: [-0.5, -0.5, 0.5],
-        //     normal: [0.0, 0.0, -1.0],
-        // },
-        // Vertex {
-        //     position: [0.5, -0.5, 0.5],
-        //     normal: [0.0, 0.0, -1.0],
-        // },
-        // Vertex {
-        //     position: [-0.5, 0.5, 0.5],
-        //     normal: [0.0, 0.0, -1.0],
-        // },
+        }, // Left Face
+        Vertex {
+            position: [-0.5, 0.5, -0.5],
+            normal: [-1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [-0.5, -0.5, 0.5],
+            normal: [-1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [-0.5, -0.5, -0.5],
+            normal: [-1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [-0.5, 0.5, 0.5],
+            normal: [-1.0, 0.0, 0.0],
+        },
+        // Right Face
+        Vertex {
+            position: [0.5, 0.5, -0.5],
+            normal: [1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, 0.5],
+            normal: [1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, 0.5, 0.5],
+            normal: [1.0, 0.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, -0.5],
+            normal: [1.0, 0.0, 0.0],
+        },
+        // Top Face
+        Vertex {
+            position: [-0.5, -0.5, -0.5],
+            normal: [0.0, -1.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, 0.5],
+            normal: [0.0, -1.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, -0.5, -0.5],
+            normal: [0.0, -1.0, 0.0],
+        },
+        Vertex {
+            position: [-0.5, -0.5, 0.5],
+            normal: [0.0, -1.0, 0.0],
+        },
+        // Bottom Face
+        Vertex {
+            position: [-0.5, 0.5, -0.5],
+            normal: [0.0, 1.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, 0.5, 0.5],
+            normal: [0.0, 1.0, 0.0],
+        },
+        Vertex {
+            position: [-0.5, 0.5, 0.5],
+            normal: [0.0, 1.0, 0.0],
+        },
+        Vertex {
+            position: [0.5, 0.5, -0.5],
+            normal: [0.0, 1.0, 0.0],
+        },
     ];
 
-    let indices: [u32; 6] = [0, 1, 2, 3, 0, 1]; // , 4, 5, 6, 7, 5, 6
+    let indices = make_square_indices(&vertices); // [0, 1, 2, 3, 0, 1, 4, 5, 6, 7, 4, 5]
+
+    // println!("{:?}\n{}", indices, indices.len());
 
     mod vs {
         vulkano_shaders::shader! {
@@ -336,7 +435,9 @@ fn main() {
                 layout(location = 1) in vec3 normal;
 
                 layout(location = 0) out vec3 o_normal;
-            
+                layout(location = 1) out vec3 o_colour;
+                layout(location = 2) out vec3 o_fragPos;
+             
                 layout(set = 0, binding = 0) uniform MVP_Data {
                     mat4 model;
                     mat4 view;
@@ -344,8 +445,10 @@ fn main() {
                 } uniforms;
             
                 void main() {
-                            o_normal = normal;
-            
+                            o_normal = mat3(uniforms.model) * normal;
+                            o_colour = vec3((normal.x + 1.0 / 2.0), (normal.y + 1.0 / 2.0), (normal.z + 1.0 / 2.0));
+                            o_fragPos = vec3(uniforms.model * vec4(position, 1.0));
+                            
                             mat4 mvp = uniforms.proj * uniforms.view * uniforms.model;
             
                             gl_Position = mvp * vec4(position, 1.0);
@@ -364,10 +467,22 @@ fn main() {
             src: "#version 450
                         
                 layout(location = 0) in vec3 normal;
+                layout(location = 1) in vec3 colour;
+                layout(location = 2) in vec3 fragPos;
+                       
                 layout(location = 0) out vec4 f_color;
             
                 void main() {
-                            f_color = vec4(1.0, 0.0, 0.0, 1.0);
+                    vec3 lightCol = vec3(1.0);
+                    vec3 lightPos = vec3(0.0, 0.0, -10.0);    
+            
+                    vec3 lightDir = normalize(lightPos - fragPos);
+
+                    vec3 ambient = vec3(0.0);
+
+                    vec3 dir_colour = max(dot(normal, lightDir), 0.0) * lightCol;
+
+                    f_color = vec4((dir_colour + ambient), 1.0);
                 }",
         }
     }
@@ -419,6 +534,16 @@ fn main() {
                     let new_dimensions = surface.window().inner_size();
                     dimensions = new_dimensions;
 
+                    let new_depth_buffer = ImageView::new_default(
+                        AttachmentImage::transient(
+                            device.clone(),
+                            new_dimensions.into(),
+                            Format::D16_UNORM,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+
                     let (new_swapchain, new_images) =
                         match swapchain.recreate(SwapchainCreateInfo {
                             image_extent: new_dimensions.into(),
@@ -430,7 +555,11 @@ fn main() {
                         };
                     swapchain = new_swapchain;
 
-                    let new_framebuffers = get_framebuffers(&new_images, render_pass.clone());
+                    let new_framebuffers = get_framebuffers(
+                        &new_images,
+                        render_pass.clone(),
+                        new_depth_buffer.clone(),
+                    );
                     framebuffers = new_framebuffers;
                 }
             };
