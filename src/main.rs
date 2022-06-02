@@ -52,6 +52,7 @@ struct MVP {
     proj: TMat4<f32>,
 }
 
+#[allow(dead_code)]
 impl MVP {
     fn new() -> MVP {
         MVP {
@@ -69,6 +70,8 @@ const BG_COL: [f32; 4] = [0.40, 0.40, 0.40, 1.0];
 fn get_framebuffers(
     images: &[Arc<SwapchainImage<Window>>],
     render_pass: Arc<RenderPass>,
+    colour_buffer: Arc<ImageView<AttachmentImage>>,
+    normal_buffer: Arc<ImageView<AttachmentImage>>,
     depth_buffer: Arc<ImageView<AttachmentImage>>,
 ) -> Vec<Arc<Framebuffer>> {
     images
@@ -78,7 +81,12 @@ fn get_framebuffers(
             Framebuffer::new(
                 render_pass.clone(),
                 FramebufferCreateInfo {
-                    attachments: vec![view, depth_buffer.clone()],
+                    attachments: vec![
+                        view,
+                        colour_buffer.clone(),
+                        normal_buffer.clone(),
+                        depth_buffer.clone(),
+                    ],
                     ..Default::default()
                 },
             )
@@ -112,31 +120,71 @@ fn select_physical_device<'a>(
 }
 
 fn get_render_pass(device: Arc<Device>, swapchain: Arc<Swapchain<Window>>) -> Arc<RenderPass> {
-    vulkano::single_pass_renderpass!(
+    vulkano::ordered_passes_renderpass!(
         device.clone(),
         attachments: {
+                final_color: {
+                    load: Clear,
+                    store: Store,
+                    format: swapchain.image_format(),  // set the format the same as the swapchain
+                    samples: 1,
+                },
                 color: {
-                        load: Clear,
-                        store: Store,
-                        format: swapchain.image_format(),  // set the format the same as the swapchain
-                        samples: 1,
-                    },
-                    depth: {
-                        load: Clear,
-                        store: DontCare,
-                        format: Format::D16_UNORM,
-                        samples: 1,
-                    }
+                    load: Clear,
+                    store: DontCare,
+                    format: Format::A2B10G10R10_UNORM_PACK32,  // set the format the same as the swapchain
+                    samples: 1,
+                },
+                normals: {
+                    load: Clear,
+                    store: DontCare,
+                    format: Format::R16G16B16A16_SFLOAT,  // set the format the same as the swapchain
+                    samples: 1,
+                },
+                depth: {
+                    load: Clear,
+                    store: DontCare,
+                    format: Format::D16_UNORM,
+                    samples: 1,
+                }
             },
-        pass: {
-                color: [color],
-                depth_stencil: {depth}
+        passes: [
+            {
+                color: [color, normals],
+                depth_stencil: {depth},
+                input: []
+            },
+            {
+                color: [final_color],
+                depth_stencil: {},
+                input: [color, normals]
             }
+        ]
     )
     .unwrap()
 }
 
-fn get_pipeline(
+// fn get_pipeline(
+//     device: Arc<Device>,
+//     vs: Arc<ShaderModule>,
+//     fs: Arc<ShaderModule>,
+//     render_pass: Arc<RenderPass>,
+//     viewport: Viewport,
+// ) -> Arc<GraphicsPipeline> {
+//     GraphicsPipeline::start()
+//         .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+//         .vertex_shader(vs.entry_point("main").unwrap(), ())
+//         .input_assembly_state(InputAssemblyState::new())
+//         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
+//         .fragment_shader(fs.entry_point("main").unwrap(), ())
+//         .depth_stencil_state(DepthStencilState::simple_depth_test())
+//         .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+//         .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+//         .build(device.clone())
+//         .unwrap()
+// }
+
+fn get_deferred_pipeline(
     device: Arc<Device>,
     vs: Arc<ShaderModule>,
     fs: Arc<ShaderModule>,
@@ -215,7 +263,7 @@ fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> MVP {
     );
     let proj = nalgebra_glm::perspective(
         (dimensions.width as f32) / (dimensions.height as f32),
-        90f32,
+        5f32 * (dt.as_secs_f32() * 0.2f32).sin().abs() + 80f32,
         0.05f32,
         1000f32,
     );
@@ -307,7 +355,7 @@ fn main() {
     )
     .unwrap();
 
-    let render_pass = get_render_pass(device.clone(), swapchain.clone());
+    let mut render_pass = get_render_pass(device.clone(), swapchain.clone());
 
     let depth_buffer = ImageView::new_default(
         AttachmentImage::transient(device.clone(), dimensions.clone().into(), Format::D16_UNORM)
@@ -315,7 +363,32 @@ fn main() {
     )
     .unwrap();
 
-    let mut framebuffers = get_framebuffers(&images, render_pass.clone(), depth_buffer.clone());
+    let colour_buffer = ImageView::new_default(
+        AttachmentImage::transient_input_attachment(
+            device.clone(),
+            dimensions.clone().into(),
+            Format::A2B10G10R10_UNORM_PACK32,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let normal_buffer = ImageView::new_default(
+        AttachmentImage::transient_input_attachment(
+            device.clone(),
+            dimensions.clone().into(),
+            Format::R16G16B16A16_SFLOAT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut framebuffers = get_framebuffers(
+        &images,
+        render_pass.clone(),
+        colour_buffer.clone(),
+        normal_buffer.clone(),
+        depth_buffer.clone(),
+    );
 
     let vertices = vec![
         // Front Face
@@ -425,70 +498,118 @@ fn main() {
 
     // println!("{:?}\n{}", indices, indices.len());
 
-    mod vs {
+    // mod vs {
+    //     vulkano_shaders::shader! {
+    //         ty: "vertex",
+    //         src: "
+    //             #version 450
+
+    //             layout(location = 0) in vec3 position;
+    //             layout(location = 1) in vec3 normal;
+
+    //             layout(location = 0) out vec3 o_normal;
+    //             layout(location = 1) out vec3 o_colour;
+    //             layout(location = 2) out vec3 o_fragPos;
+
+    //             layout(set = 0, binding = 0) uniform MVP_Data {
+    //                 mat4 model;
+    //                 mat4 view;
+    //                 mat4 proj;
+    //             } uniforms;
+
+    //             void main() {
+    //                         o_normal = mat3(uniforms.model) * normal;
+    //                         o_colour = normalize(normal) * 0.5 + 0.5;
+    //                         o_fragPos = vec3(uniforms.model * vec4(position, 1.0));
+
+    //                         mat4 mvp = uniforms.proj * uniforms.view * uniforms.model;
+
+    //                         gl_Position = mvp * vec4(position, 1.0);
+    //             }",
+    //         types_meta: {
+    //                 use bytemuck::{Zeroable, Pod};
+
+    //                 #[derive(Clone, Copy, Zeroable, Pod)]
+    //             },
+    //     }
+    // }
+
+    // mod fs {
+    //     vulkano_shaders::shader! {
+    //         ty: "fragment",
+    //         src: "#version 450
+
+    //             layout(location = 0) in vec3 normal;
+    //             layout(location = 1) in vec3 colour;
+    //             layout(location = 2) in vec3 fragPos;
+
+    //             layout(location = 0) out vec4 f_color;
+
+    //             void main() {
+    //                 vec3 lightCol = vec3(1.0);
+    //                 vec3 lightPos = vec3(0.0, 0.0, -10.0);
+
+    //                 vec3 lightDir = normalize(lightPos - fragPos);
+
+    //                 vec3 ambient = vec3(0.1);
+
+    //                 vec3 dir_colour = max(dot(normal, lightDir), 0.0) * lightCol;
+
+    //                 f_color = vec4((dir_colour + ambient) * colour, 1.0);
+    //             }",
+    //     }
+    // }
+
+    // let vs = vs::load(device.clone()).expect("failed to create vertex shader module");
+    // let fs = fs::load(device.clone()).expect("failed to create vertex shader module");
+
+    mod deferred_vert {
         vulkano_shaders::shader! {
             ty: "vertex",
-            src: "
-                #version 450
-            
-                layout(location = 0) in vec3 position;
-                layout(location = 1) in vec3 normal;
-
-                layout(location = 0) out vec3 o_normal;
-                layout(location = 1) out vec3 o_colour;
-                layout(location = 2) out vec3 o_fragPos;
-             
-                layout(set = 0, binding = 0) uniform MVP_Data {
-                    mat4 model;
-                    mat4 view;
-                    mat4 proj;
-                } uniforms;
-            
-                void main() {
-                            o_normal = mat3(uniforms.model) * normal;
-                            o_colour = vec3((normal.x + 1.0 / 2.0), (normal.y + 1.0 / 2.0), (normal.z + 1.0 / 2.0));
-                            o_fragPos = vec3(uniforms.model * vec4(position, 1.0));
-                            
-                            mat4 mvp = uniforms.proj * uniforms.view * uniforms.model;
-            
-                            gl_Position = mvp * vec4(position, 1.0);
-                }",
+            path: "src/shaders/deferred.vert.glsl",
             types_meta: {
-                    use bytemuck::{Zeroable, Pod};
+                    use bytemuck::{Pod, Zeroable};
 
                     #[derive(Clone, Copy, Zeroable, Pod)]
                 },
         }
     }
 
-    mod fs {
+    mod deferred_frag {
         vulkano_shaders::shader! {
             ty: "fragment",
-            src: "#version 450
-                        
-                layout(location = 0) in vec3 normal;
-                layout(location = 1) in vec3 colour;
-                layout(location = 2) in vec3 fragPos;
-                       
-                layout(location = 0) out vec4 f_color;
-            
-                void main() {
-                    vec3 lightCol = vec3(1.0);
-                    vec3 lightPos = vec3(0.0, 0.0, -10.0);    
-            
-                    vec3 lightDir = normalize(lightPos - fragPos);
-
-                    vec3 ambient = vec3(0.0);
-
-                    vec3 dir_colour = max(dot(normal, lightDir), 0.0) * lightCol;
-
-                    f_color = vec4((dir_colour + ambient), 1.0);
-                }",
+            path: "src/shaders/deferred.frag.glsl"
         }
     }
 
-    let vs = vs::load(device.clone()).expect("failed to create vertex shader module");
-    let fs = fs::load(device.clone()).expect("failed to create vertex shader module");
+    mod lighting_vert {
+        vulkano_shaders::shader! {
+            ty: "vertex",
+            path: "src/shaders/lighting.vert.glsl",
+            types_meta: {
+                    use bytemuck::{Pod, Zeroable};
+
+                    #[derive(Clone, Copy, Zeroable, Pod)]
+                },
+        }
+    }
+
+    mod lighting_frag {
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            path: "src/shaders/lighting.frag.glsl",
+            types_meta: {
+                    use bytemuck::{Pod, Zeroable};
+
+                    #[derive(Clone, Copy, Zeroable, Pod)]
+                },
+        }
+    }
+
+    let deferred_vert = deferred_vert::load(device.clone()).unwrap();
+    let deferred_frag = deferred_frag::load(device.clone()).unwrap();
+    let lighting_vert = lighting_vert::load(device.clone()).unwrap();
+    let lighting_frag = lighting_frag::load(device.clone()).unwrap();
 
     let uniform_buffer = CpuBufferPool::<vs::ty::MVP_Data>::uniform_buffer(device.clone());
 
@@ -544,6 +665,26 @@ fn main() {
                     )
                     .unwrap();
 
+                    let new_colour_buffer = ImageView::new_default(
+                        AttachmentImage::transient_input_attachment(
+                            device.clone(),
+                            dimensions.clone().into(),
+                            Format::A2B10G10R10_UNORM_PACK32,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+
+                    let new_normal_buffer = ImageView::new_default(
+                        AttachmentImage::transient_input_attachment(
+                            device.clone(),
+                            dimensions.clone().into(),
+                            Format::R16G16B16A16_SFLOAT,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+
                     let (new_swapchain, new_images) =
                         match swapchain.recreate(SwapchainCreateInfo {
                             image_extent: new_dimensions.into(),
@@ -553,11 +694,18 @@ fn main() {
                             Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
                             Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
                         };
-                    swapchain = new_swapchain;
+                    swapchain = new_swapchain.clone();
+
+                    render_pass = get_render_pass(device.clone(), new_swapchain.clone());
+
+                    let deferred_pass = Subpass::from(render_pass.clone(), 0).unwrap();
+                    let lighting_pass = Subpass::from(render_pass.clone(), 1).unwrap();
 
                     let new_framebuffers = get_framebuffers(
                         &new_images,
                         render_pass.clone(),
+                        new_colour_buffer.clone(),
+                        new_normal_buffer.clone(),
                         new_depth_buffer.clone(),
                     );
                     framebuffers = new_framebuffers;
