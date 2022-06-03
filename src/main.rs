@@ -83,8 +83,8 @@ fn get_framebuffers(
                 FramebufferCreateInfo {
                     attachments: vec![
                         view,
-                        colour_buffer.clone(),
                         normal_buffer.clone(),
+                        colour_buffer.clone(),
                         depth_buffer.clone(),
                     ],
                     ..Default::default()
@@ -123,22 +123,23 @@ fn get_render_pass(device: Arc<Device>, swapchain: Arc<Swapchain<Window>>) -> Ar
     vulkano::ordered_passes_renderpass!(
         device.clone(),
         attachments: {
-                final_color: {
+                final_colour: {
                     load: Clear,
                     store: Store,
                     format: swapchain.image_format(),  // set the format the same as the swapchain
                     samples: 1,
                 },
-                color: {
-                    load: Clear,
-                    store: DontCare,
-                    format: Format::A2B10G10R10_UNORM_PACK32,  // set the format the same as the swapchain
-                    samples: 1,
-                },
+
                 normals: {
                     load: Clear,
                     store: DontCare,
                     format: Format::R16G16B16A16_SFLOAT,  // set the format the same as the swapchain
+                    samples: 1,
+                },
+                colour: {
+                    load: Clear,
+                    store: DontCare,
+                    format: Format::A2B10G10R10_UNORM_PACK32,  // set the format the same as the swapchain
                     samples: 1,
                 },
                 depth: {
@@ -150,45 +151,44 @@ fn get_render_pass(device: Arc<Device>, swapchain: Arc<Swapchain<Window>>) -> Ar
             },
         passes: [
             {
-                color: [color, normals],
+                color: [normals, colour],
                 depth_stencil: {depth},
                 input: []
             },
             {
-                color: [final_color],
+                color: [final_colour],
                 depth_stencil: {},
-                input: [color, normals]
+                input: [normals, colour]
             }
         ]
     )
     .unwrap()
 }
 
-// fn get_pipeline(
-//     device: Arc<Device>,
-//     vs: Arc<ShaderModule>,
-//     fs: Arc<ShaderModule>,
-//     render_pass: Arc<RenderPass>,
-//     viewport: Viewport,
-// ) -> Arc<GraphicsPipeline> {
-//     GraphicsPipeline::start()
-//         .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
-//         .vertex_shader(vs.entry_point("main").unwrap(), ())
-//         .input_assembly_state(InputAssemblyState::new())
-//         .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
-//         .fragment_shader(fs.entry_point("main").unwrap(), ())
-//         .depth_stencil_state(DepthStencilState::simple_depth_test())
-//         .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
-//         .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
-//         .build(device.clone())
-//         .unwrap()
-// }
-
-fn get_deferred_pipeline(
+fn get_pipeline(
     device: Arc<Device>,
     vs: Arc<ShaderModule>,
     fs: Arc<ShaderModule>,
-    render_pass: Arc<RenderPass>,
+    subpass: Subpass,
+    viewport: Viewport,
+) -> Arc<GraphicsPipeline> {
+    GraphicsPipeline::start()
+        .vertex_input_state(BuffersDefinition::new().vertex::<Vertex>())
+        .vertex_shader(vs.entry_point("main").unwrap(), ())
+        .input_assembly_state(InputAssemblyState::new())
+        .viewport_state(ViewportState::viewport_fixed_scissor_irrelevant([viewport]))
+        .fragment_shader(fs.entry_point("main").unwrap(), ())
+        .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
+        .render_pass(subpass)
+        .build(device.clone())
+        .unwrap()
+}
+
+fn get_pipeline_with_depth(
+    device: Arc<Device>,
+    vs: Arc<ShaderModule>,
+    fs: Arc<ShaderModule>,
+    subpass: Subpass,
     viewport: Viewport,
 ) -> Arc<GraphicsPipeline> {
     GraphicsPipeline::start()
@@ -199,7 +199,7 @@ fn get_deferred_pipeline(
         .fragment_shader(fs.entry_point("main").unwrap(), ())
         .depth_stencil_state(DepthStencilState::simple_depth_test())
         .rasterization_state(RasterizationState::new().cull_mode(CullMode::Back))
-        .render_pass(Subpass::from(render_pass.clone(), 0).unwrap())
+        .render_pass(subpass)
         .build(device.clone())
         .unwrap()
 }
@@ -207,8 +207,10 @@ fn get_deferred_pipeline(
 fn get_command_buffers(
     device: Arc<Device>,
     queue: Arc<Queue>,
-    pipeline: Arc<GraphicsPipeline>,
-    set: Arc<PersistentDescriptorSet>,
+    deferred_pipeline: Arc<GraphicsPipeline>,
+    deferred_set: Arc<PersistentDescriptorSet>,
+    lighting_pipeline: Arc<GraphicsPipeline>,
+    lighting_set: Arc<PersistentDescriptorSet>,
     framebuffers: &Vec<Arc<Framebuffer>>,
     vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
     index_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
@@ -227,17 +229,28 @@ fn get_command_buffers(
                 .begin_render_pass(
                     framebuffer.clone(),
                     SubpassContents::Inline,
-                    vec![BG_COL.into(), 1f32.into()], // Use 1f32 for depth clear to give unique colour
+                    vec![BG_COL.into(), BG_COL.into(), BG_COL.into(), 1f32.into()], // Use 1f32 for depth clear to give unique colour
                 )
                 .unwrap()
-                .bind_pipeline_graphics(pipeline.clone())
-                .bind_vertex_buffers(0, vertex_buffer.clone())
-                .bind_index_buffer(index_buffer.clone())
+                .bind_pipeline_graphics(deferred_pipeline.clone())
                 .bind_descriptor_sets(
                     PipelineBindPoint::Graphics,
-                    pipeline.layout().clone(),
+                    deferred_pipeline.layout().clone(),
                     0,
-                    set.clone(),
+                    deferred_set.clone(),
+                )
+                .bind_vertex_buffers(0, vertex_buffer.clone())
+                .bind_index_buffer(index_buffer.clone())
+                .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0)
+                .unwrap()
+                .next_subpass(SubpassContents::Inline)
+                .unwrap()
+                .bind_pipeline_graphics(lighting_pipeline.clone())
+                .bind_descriptor_sets(
+                    PipelineBindPoint::Graphics,
+                    lighting_pipeline.layout().clone(),
+                    0,
+                    lighting_set.clone(),
                 )
                 .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0)
                 .unwrap()
@@ -263,7 +276,7 @@ fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> MVP {
     );
     let proj = nalgebra_glm::perspective(
         (dimensions.width as f32) / (dimensions.height as f32),
-        5f32 * (dt.as_secs_f32() * 0.2f32).sin().abs() + 80f32,
+        ((dt.as_secs_f32() * 0.8f32).sin()).abs() + 80f32,
         0.05f32,
         1000f32,
     );
@@ -363,20 +376,21 @@ fn main() {
     )
     .unwrap();
 
-    let colour_buffer = ImageView::new_default(
-        AttachmentImage::transient_input_attachment(
-            device.clone(),
-            dimensions.clone().into(),
-            Format::A2B10G10R10_UNORM_PACK32,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let normal_buffer = ImageView::new_default(
+    let mut normal_buffer = ImageView::new_default(
         AttachmentImage::transient_input_attachment(
             device.clone(),
             dimensions.clone().into(),
             Format::R16G16B16A16_SFLOAT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut colour_buffer = ImageView::new_default(
+        AttachmentImage::transient_input_attachment(
+            device.clone(),
+            dimensions.clone().into(),
+            Format::A2B10G10R10_UNORM_PACK32,
         )
         .unwrap(),
     )
@@ -568,17 +582,17 @@ fn main() {
             ty: "vertex",
             path: "src/shaders/deferred.vert.glsl",
             types_meta: {
-                    use bytemuck::{Pod, Zeroable};
+                use bytemuck::{Pod, Zeroable};
 
-                    #[derive(Clone, Copy, Zeroable, Pod)]
-                },
+                #[derive(Clone, Copy, Zeroable, Pod)]
+            },
         }
     }
 
     mod deferred_frag {
         vulkano_shaders::shader! {
             ty: "fragment",
-            path: "src/shaders/deferred.frag.glsl"
+            path: "src/shaders/deferred.frag.glsl",
         }
     }
 
@@ -587,10 +601,10 @@ fn main() {
             ty: "vertex",
             path: "src/shaders/lighting.vert.glsl",
             types_meta: {
-                    use bytemuck::{Pod, Zeroable};
+                use bytemuck::{Pod, Zeroable};
 
-                    #[derive(Clone, Copy, Zeroable, Pod)]
-                },
+                #[derive(Clone, Copy, Zeroable, Pod)]
+            },
         }
     }
 
@@ -598,11 +612,11 @@ fn main() {
         vulkano_shaders::shader! {
             ty: "fragment",
             path: "src/shaders/lighting.frag.glsl",
-            types_meta: {
-                    use bytemuck::{Pod, Zeroable};
+            // types_meta: {
+            //     use bytemuck::{Pod, Zeroable};
 
-                    #[derive(Clone, Copy, Zeroable, Pod)]
-                },
+            //     #[derive(Clone, Copy, Zeroable, Pod)]
+            // },
         }
     }
 
@@ -611,7 +625,8 @@ fn main() {
     let lighting_vert = lighting_vert::load(device.clone()).unwrap();
     let lighting_frag = lighting_frag::load(device.clone()).unwrap();
 
-    let uniform_buffer = CpuBufferPool::<vs::ty::MVP_Data>::uniform_buffer(device.clone());
+    let uniform_buffer =
+        CpuBufferPool::<deferred_vert::ty::MVP_Data>::uniform_buffer(device.clone());
 
     let mut viewport = Viewport {
         origin: [0.0, 0.0],
@@ -643,6 +658,7 @@ fn main() {
             window_resized = true;
         }
         Event::RedrawEventsCleared => {
+            #[allow(unused_variables)]
             let dt = past_time.elapsed();
             past_time = Instant::now();
 
@@ -665,21 +681,21 @@ fn main() {
                     )
                     .unwrap();
 
-                    let new_colour_buffer = ImageView::new_default(
+                    normal_buffer = ImageView::new_default(
                         AttachmentImage::transient_input_attachment(
                             device.clone(),
                             dimensions.clone().into(),
-                            Format::A2B10G10R10_UNORM_PACK32,
+                            Format::R16G16B16A16_SFLOAT,
                         )
                         .unwrap(),
                     )
                     .unwrap();
 
-                    let new_normal_buffer = ImageView::new_default(
+                    colour_buffer = ImageView::new_default(
                         AttachmentImage::transient_input_attachment(
                             device.clone(),
                             dimensions.clone().into(),
-                            Format::R16G16B16A16_SFLOAT,
+                            Format::A2B10G10R10_UNORM_PACK32,
                         )
                         .unwrap(),
                     )
@@ -698,14 +714,11 @@ fn main() {
 
                     render_pass = get_render_pass(device.clone(), new_swapchain.clone());
 
-                    let deferred_pass = Subpass::from(render_pass.clone(), 0).unwrap();
-                    let lighting_pass = Subpass::from(render_pass.clone(), 1).unwrap();
-
                     let new_framebuffers = get_framebuffers(
                         &new_images,
                         render_pass.clone(),
-                        new_colour_buffer.clone(),
-                        new_normal_buffer.clone(),
+                        colour_buffer.clone(),
+                        normal_buffer.clone(),
                         new_depth_buffer.clone(),
                     );
                     framebuffers = new_framebuffers;
@@ -729,17 +742,29 @@ fn main() {
             .unwrap();
 
             viewport.dimensions = dimensions.into();
-            let new_pipeline = get_pipeline(
+
+            let deferred_pass = Subpass::from(render_pass.clone(), 0).unwrap();
+            let lighting_pass = Subpass::from(render_pass.clone(), 1).unwrap();
+
+            let deferred_pipeline = get_pipeline_with_depth(
                 device.clone(),
-                vs.clone(),
-                fs.clone(),
-                render_pass.clone(),
+                deferred_vert.clone(),
+                deferred_frag.clone(),
+                deferred_pass.clone(),
+                viewport.clone(),
+            );
+
+            let lighting_pipeline = get_pipeline(
+                device.clone(),
+                lighting_vert.clone(),
+                lighting_frag.clone(),
+                lighting_pass.clone(),
                 viewport.clone(),
             );
 
             let uniform_buffer_subbuffer = {
                 let mvp = get_mvp(dimensions, time.elapsed());
-                let uniform_data = vs::ty::MVP_Data {
+                let uniform_data = deferred_vert::ty::MVP_Data {
                     model: mvp.model.into(),
                     view: mvp.view.into(),
                     proj: mvp.proj.into(),
@@ -748,21 +773,56 @@ fn main() {
                 uniform_buffer.next(uniform_data).unwrap()
             };
 
-            let owned_pipeline = new_pipeline.clone().to_owned();
+            let deferred_layout = deferred_pipeline
+                .layout()
+                .set_layouts()
+                .get(0)
+                .clone()
+                .unwrap();
+            // let mut deferred_set_builder = PersistentDescriptorSet::start(deferred_layout.clone());
 
-            let layout = owned_pipeline.layout().set_layouts().get(0).unwrap();
-
-            let set = PersistentDescriptorSet::new(
-                layout.clone(),
-                [WriteDescriptorSet::buffer(0, uniform_buffer_subbuffer)],
+            let deferred_set = PersistentDescriptorSet::new(
+                deferred_layout.clone(),
+                [WriteDescriptorSet::buffer(
+                    0,
+                    uniform_buffer_subbuffer.clone(),
+                )],
             )
             .unwrap();
+
+            let lighting_layout = lighting_pipeline
+                .layout()
+                .set_layouts()
+                .get(0)
+                .clone()
+                .unwrap();
+            let lighting_set = PersistentDescriptorSet::new(
+                lighting_layout.clone(),
+                [
+                    WriteDescriptorSet::image_view(0, normal_buffer.clone()),
+                    WriteDescriptorSet::image_view(1, colour_buffer.clone()),
+                    WriteDescriptorSet::buffer(2, uniform_buffer_subbuffer.clone()),
+                ],
+            )
+            .unwrap();
+
+            // let owned_pipeline = new_pipeline.clone().to_owned();
+
+            // let layout = owned_pipeline.layout().set_layouts().get(0).unwrap();
+
+            // let set = PersistentDescriptorSet::new(
+            //     layout.clone(),
+            //     [WriteDescriptorSet::buffer(0, uniform_buffer_subbuffer)],
+            // )
+            // .unwrap();
 
             let command_buffers = get_command_buffers(
                 device.clone(),
                 queue.clone(),
-                new_pipeline,
-                set,
+                deferred_pipeline.clone(),
+                deferred_set.clone(),
+                lighting_pipeline.clone(),
+                lighting_set.clone(),
                 &framebuffers,
                 vertex_buffer_e.clone(),
                 index_buffer_e.clone(),
