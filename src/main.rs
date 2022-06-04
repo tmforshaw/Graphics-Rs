@@ -31,41 +31,57 @@ use winit::window::WindowBuilder;
 
 use std::sync::Arc;
 
-use bytemuck::{Pod, Zeroable};
+use std::time::Instant;
 
-use nalgebra_glm::{identity, TMat4, TVec3};
+mod mvp;
+mod vertex;
 
-use std::time::{Duration, Instant};
+use vertex::Vertex;
 
-#[repr(C)]
-#[derive(Default, Copy, Clone, Zeroable, Pod)]
-struct Vertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-}
+const BG_COL: [f32; 4] = [0.40, 0.40, 0.40, 1.0];
 
-#[repr(C)]
-#[derive(Default, Clone)]
-struct MVP {
-    model: TMat4<f32>,
-    view: TMat4<f32>,
-    proj: TMat4<f32>,
-}
+mod deferred_vert {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/shaders/deferred.vert.glsl",
+        types_meta: {
+            use bytemuck::{Pod, Zeroable};
 
-#[allow(dead_code)]
-impl MVP {
-    fn new() -> MVP {
-        MVP {
-            model: identity(),
-            view: identity(),
-            proj: identity(),
-        }
+            #[derive(Clone, Copy, Zeroable, Pod)]
+        },
     }
 }
 
-vulkano::impl_vertex!(Vertex, position, normal);
+mod deferred_frag {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/deferred.frag.glsl",
+    }
+}
 
-const BG_COL: [f32; 4] = [0.40, 0.40, 0.40, 1.0];
+mod lighting_vert {
+    vulkano_shaders::shader! {
+        ty: "vertex",
+        path: "src/shaders/lighting.vert.glsl",
+        types_meta: {
+            use bytemuck::{Pod, Zeroable};
+
+            #[derive(Clone, Copy, Zeroable, Pod)]
+        },
+    }
+}
+
+mod lighting_frag {
+    vulkano_shaders::shader! {
+        ty: "fragment",
+        path: "src/shaders/lighting.frag.glsl",
+        // types_meta: {
+        //     use bytemuck::{Pod, Zeroable};
+
+        //     #[derive(Clone, Copy, Zeroable, Pod)]
+        // },
+    }
+}
 
 fn get_framebuffers(
     images: &[Arc<SwapchainImage<Window>>],
@@ -262,28 +278,6 @@ fn get_command_buffers(
         .collect()
 }
 
-fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> MVP {
-    let rotation = nalgebra_glm::rotation(
-        dt.as_millis() as f32 * 0.002,
-        &TVec3::new(0.5f32, -0.5f32, 0.5f32),
-    );
-
-    let model: TMat4<f32> = nalgebra_glm::translation(&TVec3::new(0f32, 0f32, 1f32)) * rotation;
-    let view = nalgebra_glm::look_at_rh(
-        &TVec3::new(0f32, 0f32, -1f32),
-        &TVec3::new(0f32, 0f32, 1f32),
-        &TVec3::<f32>::new(0f32, -1f32, 0f32),
-    );
-    let proj = nalgebra_glm::perspective(
-        (dimensions.width as f32) / (dimensions.height as f32),
-        ((dt.as_secs_f32() * 0.8f32).sin()).abs() + 80f32,
-        0.05f32,
-        1000f32,
-    );
-
-    MVP { model, view, proj }
-}
-
 fn make_square_indices(vertices: &Vec<Vertex>) -> Vec<u32> {
     assert_eq!(vertices.len() % 4, 0);
 
@@ -300,6 +294,113 @@ fn make_square_indices(vertices: &Vec<Vertex>) -> Vec<u32> {
     }
 
     indices
+}
+
+fn new_attachment_image(
+    device: Arc<Device>,
+    dimensions: winit::dpi::PhysicalSize<u32>,
+    format: Format,
+) -> Arc<ImageView<AttachmentImage>> {
+    ImageView::new_default(
+        AttachmentImage::transient_input_attachment(
+            device.clone(),
+            dimensions.clone().into(),
+            format,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+fn recreate_swapchain(
+    dimensions: winit::dpi::PhysicalSize<u32>,
+    device: Arc<Device>,
+    swapchain: Arc<Swapchain<Window>>,
+) -> Option<(
+    Arc<Swapchain<Window>>,
+    winit::dpi::PhysicalSize<u32>,
+    Vec<Arc<Framebuffer>>,
+    Arc<RenderPass>,
+    Arc<ImageView<AttachmentImage>>,
+    Arc<ImageView<AttachmentImage>>,
+)> {
+    // Recreate attachment image buffers
+    let depth_buffer = new_attachment_image(device.clone(), dimensions, Format::D16_UNORM);
+    let normal_buffer =
+        new_attachment_image(device.clone(), dimensions, Format::R16G16B16A16_SFLOAT);
+    let colour_buffer =
+        new_attachment_image(device.clone(), dimensions, Format::A2B10G10R10_UNORM_PACK32);
+
+    let (new_swapchain, images) = match swapchain.recreate(SwapchainCreateInfo {
+        image_extent: dimensions.into(),
+        ..swapchain.create_info()
+    }) {
+        Ok(r) => r,
+        Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return Option::None,
+        Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
+    };
+
+    let render_pass = get_render_pass(device, swapchain);
+
+    let framebuffers = get_framebuffers(
+        &images,
+        render_pass.clone(),
+        colour_buffer.clone(),
+        normal_buffer.clone(),
+        depth_buffer.clone(),
+    );
+
+    Option::from((
+        new_swapchain,
+        dimensions,
+        framebuffers,
+        render_pass,
+        normal_buffer,
+        colour_buffer,
+    ))
+}
+
+fn new_swapchain_images(
+    device: Arc<Device>,
+    physical_device: PhysicalDevice,
+    surface: &Arc<Surface<Window>>,
+) -> (
+    Arc<Swapchain<Window>>,
+    Vec<Arc<SwapchainImage<Window>>>,
+    winit::dpi::PhysicalSize<u32>,
+) {
+    let capabilities = physical_device
+        .surface_capabilities(&surface, Default::default())
+        .expect("failed to get surface capabilities");
+
+    let dimensions = surface.window().inner_size();
+    let composite_alpha = capabilities
+        .supported_composite_alpha
+        .iter()
+        .next()
+        .unwrap();
+    let image_format = Some(
+        physical_device
+            .surface_formats(&surface, Default::default())
+            .unwrap()[0]
+            .0,
+    );
+
+    let (swapchain, images) = Swapchain::new(
+        device.clone(),
+        surface.clone(),
+        SwapchainCreateInfo {
+            min_image_count: capabilities.min_image_count + 1, // How many buffers to use in the swapchain
+            image_format,
+            image_extent: dimensions.into(),
+            image_usage: ImageUsage::color_attachment(), // What the images are going to be used for
+            composite_alpha,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    (swapchain, images, dimensions)
 }
 
 fn main() {
@@ -337,64 +438,17 @@ fn main() {
 
     let queue = queues.next().unwrap();
 
-    let capabilities = physical_device
-        .surface_capabilities(&surface, Default::default())
-        .expect("failed to get surface capabilities");
-
-    let mut dimensions = surface.window().inner_size();
-    let composite_alpha = capabilities
-        .supported_composite_alpha
-        .iter()
-        .next()
-        .unwrap();
-    let image_format = Some(
-        physical_device
-            .surface_formats(&surface, Default::default())
-            .unwrap()[0]
-            .0,
-    );
-
-    let (mut swapchain, images) = Swapchain::new(
-        device.clone(),
-        surface.clone(),
-        SwapchainCreateInfo {
-            min_image_count: capabilities.min_image_count + 1, // How many buffers to use in the swapchain
-            image_format,
-            image_extent: dimensions.into(),
-            image_usage: ImageUsage::color_attachment(), // What the images are going to be used for
-            composite_alpha,
-            ..Default::default()
-        },
-    )
-    .unwrap();
+    let (mut swapchain, images, mut dimensions) =
+        new_swapchain_images(device.clone(), physical_device, &surface);
 
     let mut render_pass = get_render_pass(device.clone(), swapchain.clone());
 
-    let depth_buffer = ImageView::new_default(
-        AttachmentImage::transient(device.clone(), dimensions.clone().into(), Format::D16_UNORM)
-            .unwrap(),
-    )
-    .unwrap();
-
-    let mut normal_buffer = ImageView::new_default(
-        AttachmentImage::transient_input_attachment(
-            device.clone(),
-            dimensions.clone().into(),
-            Format::R16G16B16A16_SFLOAT,
-        )
-        .unwrap(),
-    )
-    .unwrap();
-
-    let mut colour_buffer = ImageView::new_default(
-        AttachmentImage::transient_input_attachment(
-            device.clone(),
-            dimensions.clone().into(),
-            Format::A2B10G10R10_UNORM_PACK32,
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    // Create attachment image buffers
+    let depth_buffer = new_attachment_image(device.clone(), dimensions, Format::D16_UNORM);
+    let mut normal_buffer =
+        new_attachment_image(device.clone(), dimensions, Format::R16G16B16A16_SFLOAT);
+    let mut colour_buffer =
+        new_attachment_image(device.clone(), dimensions, Format::A2B10G10R10_UNORM_PACK32);
 
     let mut framebuffers = get_framebuffers(
         &images,
@@ -404,229 +458,16 @@ fn main() {
         depth_buffer.clone(),
     );
 
-    let vertices = vec![
-        // Front Face
-        Vertex {
-            position: [-0.5, 0.5, -0.5],
-            normal: [0.0, 0.0, -1.0],
-        },
-        Vertex {
-            position: [0.5, -0.5, -0.5],
-            normal: [0.0, 0.0, -1.0],
-        },
-        Vertex {
-            position: [0.5, 0.5, -0.5],
-            normal: [0.0, 0.0, -1.0],
-        },
-        Vertex {
-            position: [-0.5, -0.5, -0.5],
-            normal: [0.0, 0.0, -1.0],
-        },
-        // Back Face
-        Vertex {
-            position: [-0.5, 0.5, 0.5],
-            normal: [0.0, 0.0, 1.0],
-        },
-        Vertex {
-            position: [0.5, -0.5, 0.5],
-            normal: [0.0, 0.0, 1.0],
-        },
-        Vertex {
-            position: [-0.5, -0.5, 0.5],
-            normal: [0.0, 0.0, 1.0],
-        },
-        Vertex {
-            position: [0.5, 0.5, 0.5],
-            normal: [0.0, 0.0, 1.0],
-        }, // Left Face
-        Vertex {
-            position: [-0.5, 0.5, -0.5],
-            normal: [-1.0, 0.0, 0.0],
-        },
-        Vertex {
-            position: [-0.5, -0.5, 0.5],
-            normal: [-1.0, 0.0, 0.0],
-        },
-        Vertex {
-            position: [-0.5, -0.5, -0.5],
-            normal: [-1.0, 0.0, 0.0],
-        },
-        Vertex {
-            position: [-0.5, 0.5, 0.5],
-            normal: [-1.0, 0.0, 0.0],
-        },
-        // Right Face
-        Vertex {
-            position: [0.5, 0.5, -0.5],
-            normal: [1.0, 0.0, 0.0],
-        },
-        Vertex {
-            position: [0.5, -0.5, 0.5],
-            normal: [1.0, 0.0, 0.0],
-        },
-        Vertex {
-            position: [0.5, 0.5, 0.5],
-            normal: [1.0, 0.0, 0.0],
-        },
-        Vertex {
-            position: [0.5, -0.5, -0.5],
-            normal: [1.0, 0.0, 0.0],
-        },
-        // Top Face
-        Vertex {
-            position: [-0.5, -0.5, -0.5],
-            normal: [0.0, -1.0, 0.0],
-        },
-        Vertex {
-            position: [0.5, -0.5, 0.5],
-            normal: [0.0, -1.0, 0.0],
-        },
-        Vertex {
-            position: [0.5, -0.5, -0.5],
-            normal: [0.0, -1.0, 0.0],
-        },
-        Vertex {
-            position: [-0.5, -0.5, 0.5],
-            normal: [0.0, -1.0, 0.0],
-        },
-        // Bottom Face
-        Vertex {
-            position: [-0.5, 0.5, -0.5],
-            normal: [0.0, 1.0, 0.0],
-        },
-        Vertex {
-            position: [0.5, 0.5, 0.5],
-            normal: [0.0, 1.0, 0.0],
-        },
-        Vertex {
-            position: [-0.5, 0.5, 0.5],
-            normal: [0.0, 1.0, 0.0],
-        },
-        Vertex {
-            position: [0.5, 0.5, -0.5],
-            normal: [0.0, 1.0, 0.0],
-        },
-    ];
+    let vertices = vertex::CUBE_VERTICES.clone().to_vec();
 
-    let indices = make_square_indices(&vertices); // [0, 1, 2, 3, 0, 1, 4, 5, 6, 7, 4, 5]
-
-    // println!("{:?}\n{}", indices, indices.len());
-
-    // mod vs {
-    //     vulkano_shaders::shader! {
-    //         ty: "vertex",
-    //         src: "
-    //             #version 450
-
-    //             layout(location = 0) in vec3 position;
-    //             layout(location = 1) in vec3 normal;
-
-    //             layout(location = 0) out vec3 o_normal;
-    //             layout(location = 1) out vec3 o_colour;
-    //             layout(location = 2) out vec3 o_fragPos;
-
-    //             layout(set = 0, binding = 0) uniform MVP_Data {
-    //                 mat4 model;
-    //                 mat4 view;
-    //                 mat4 proj;
-    //             } uniforms;
-
-    //             void main() {
-    //                         o_normal = mat3(uniforms.model) * normal;
-    //                         o_colour = normalize(normal) * 0.5 + 0.5;
-    //                         o_fragPos = vec3(uniforms.model * vec4(position, 1.0));
-
-    //                         mat4 mvp = uniforms.proj * uniforms.view * uniforms.model;
-
-    //                         gl_Position = mvp * vec4(position, 1.0);
-    //             }",
-    //         types_meta: {
-    //                 use bytemuck::{Zeroable, Pod};
-
-    //                 #[derive(Clone, Copy, Zeroable, Pod)]
-    //             },
-    //     }
-    // }
-
-    // mod fs {
-    //     vulkano_shaders::shader! {
-    //         ty: "fragment",
-    //         src: "#version 450
-
-    //             layout(location = 0) in vec3 normal;
-    //             layout(location = 1) in vec3 colour;
-    //             layout(location = 2) in vec3 fragPos;
-
-    //             layout(location = 0) out vec4 f_color;
-
-    //             void main() {
-    //                 vec3 lightCol = vec3(1.0);
-    //                 vec3 lightPos = vec3(0.0, 0.0, -10.0);
-
-    //                 vec3 lightDir = normalize(lightPos - fragPos);
-
-    //                 vec3 ambient = vec3(0.1);
-
-    //                 vec3 dir_colour = max(dot(normal, lightDir), 0.0) * lightCol;
-
-    //                 f_color = vec4((dir_colour + ambient) * colour, 1.0);
-    //             }",
-    //     }
-    // }
-
-    // let vs = vs::load(device.clone()).expect("failed to create vertex shader module");
-    // let fs = fs::load(device.clone()).expect("failed to create vertex shader module");
-
-    mod deferred_vert {
-        vulkano_shaders::shader! {
-            ty: "vertex",
-            path: "src/shaders/deferred.vert.glsl",
-            types_meta: {
-                use bytemuck::{Pod, Zeroable};
-
-                #[derive(Clone, Copy, Zeroable, Pod)]
-            },
-        }
-    }
-
-    mod deferred_frag {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            path: "src/shaders/deferred.frag.glsl",
-        }
-    }
-
-    mod lighting_vert {
-        vulkano_shaders::shader! {
-            ty: "vertex",
-            path: "src/shaders/lighting.vert.glsl",
-            types_meta: {
-                use bytemuck::{Pod, Zeroable};
-
-                #[derive(Clone, Copy, Zeroable, Pod)]
-            },
-        }
-    }
-
-    mod lighting_frag {
-        vulkano_shaders::shader! {
-            ty: "fragment",
-            path: "src/shaders/lighting.frag.glsl",
-            // types_meta: {
-            //     use bytemuck::{Pod, Zeroable};
-
-            //     #[derive(Clone, Copy, Zeroable, Pod)]
-            // },
-        }
-    }
+    let indices = make_square_indices(&vertices.clone());
 
     let deferred_vert = deferred_vert::load(device.clone()).unwrap();
     let deferred_frag = deferred_frag::load(device.clone()).unwrap();
     let lighting_vert = lighting_vert::load(device.clone()).unwrap();
     let lighting_frag = lighting_frag::load(device.clone()).unwrap();
 
-    let uniform_buffer =
-        CpuBufferPool::<deferred_vert::ty::MVP_Data>::uniform_buffer(device.clone());
+    let mvp_buffer = CpuBufferPool::<deferred_vert::ty::MvpData>::uniform_buffer(device.clone());
 
     let mut viewport = Viewport {
         origin: [0.0, 0.0],
@@ -635,7 +476,7 @@ fn main() {
     };
 
     let mut window_resized = false;
-    let mut recreate_swapchain = false;
+    let mut recreate_swapchain_b = false;
 
     let frames_in_flight = images.len();
     let mut fences: Vec<Option<Arc<FenceSignalFuture<_>>>> = vec![None; frames_in_flight];
@@ -662,66 +503,23 @@ fn main() {
             let dt = past_time.elapsed();
             past_time = Instant::now();
 
-            if recreate_swapchain {
-                recreate_swapchain = false;
+            if recreate_swapchain_b {
+                recreate_swapchain_b = false;
 
-                if window_resized || recreate_swapchain {
-                    recreate_swapchain = false;
+                if window_resized || recreate_swapchain_b {
+                    recreate_swapchain_b = false;
 
-                    let new_dimensions = surface.window().inner_size();
-                    dimensions = new_dimensions;
+                    dimensions = surface.clone().window().inner_size();
 
-                    let new_depth_buffer = ImageView::new_default(
-                        AttachmentImage::transient(
-                            device.clone(),
-                            new_dimensions.into(),
-                            Format::D16_UNORM,
-                        )
-                        .unwrap(),
-                    )
-                    .unwrap();
-
-                    normal_buffer = ImageView::new_default(
-                        AttachmentImage::transient_input_attachment(
-                            device.clone(),
-                            dimensions.clone().into(),
-                            Format::R16G16B16A16_SFLOAT,
-                        )
-                        .unwrap(),
-                    )
-                    .unwrap();
-
-                    colour_buffer = ImageView::new_default(
-                        AttachmentImage::transient_input_attachment(
-                            device.clone(),
-                            dimensions.clone().into(),
-                            Format::A2B10G10R10_UNORM_PACK32,
-                        )
-                        .unwrap(),
-                    )
-                    .unwrap();
-
-                    let (new_swapchain, new_images) =
-                        match swapchain.recreate(SwapchainCreateInfo {
-                            image_extent: new_dimensions.into(),
-                            ..swapchain.create_info()
-                        }) {
-                            Ok(r) => r,
-                            Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return,
-                            Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
-                        };
-                    swapchain = new_swapchain.clone();
-
-                    render_pass = get_render_pass(device.clone(), new_swapchain.clone());
-
-                    let new_framebuffers = get_framebuffers(
-                        &new_images,
-                        render_pass.clone(),
-                        colour_buffer.clone(),
-                        normal_buffer.clone(),
-                        new_depth_buffer.clone(),
-                    );
-                    framebuffers = new_framebuffers;
+                    (
+                        swapchain,
+                        dimensions,
+                        framebuffers,
+                        render_pass,
+                        normal_buffer,
+                        colour_buffer,
+                    ) = recreate_swapchain(dimensions.clone(), device.clone(), swapchain.clone())
+                        .unwrap();
                 }
             };
 
@@ -762,15 +560,15 @@ fn main() {
                 viewport.clone(),
             );
 
-            let uniform_buffer_subbuffer = {
-                let mvp = get_mvp(dimensions, time.elapsed());
-                let uniform_data = deferred_vert::ty::MVP_Data {
+            let mvp_buffer_subbuffer = {
+                let mvp = mvp::get_mvp(dimensions, time.elapsed());
+                let mvp_data = deferred_vert::ty::MvpData {
                     model: mvp.model.into(),
                     view: mvp.view.into(),
                     proj: mvp.proj.into(),
                 };
 
-                uniform_buffer.next(uniform_data).unwrap()
+                mvp_buffer.next(mvp_data).unwrap()
             };
 
             let deferred_layout = deferred_pipeline
@@ -779,14 +577,9 @@ fn main() {
                 .get(0)
                 .clone()
                 .unwrap();
-            // let mut deferred_set_builder = PersistentDescriptorSet::start(deferred_layout.clone());
-
             let deferred_set = PersistentDescriptorSet::new(
                 deferred_layout.clone(),
-                [WriteDescriptorSet::buffer(
-                    0,
-                    uniform_buffer_subbuffer.clone(),
-                )],
+                [WriteDescriptorSet::buffer(0, mvp_buffer_subbuffer.clone())],
             )
             .unwrap();
 
@@ -801,20 +594,10 @@ fn main() {
                 [
                     WriteDescriptorSet::image_view(0, normal_buffer.clone()),
                     WriteDescriptorSet::image_view(1, colour_buffer.clone()),
-                    WriteDescriptorSet::buffer(2, uniform_buffer_subbuffer.clone()),
+                    WriteDescriptorSet::buffer(2, mvp_buffer_subbuffer.clone()),
                 ],
             )
             .unwrap();
-
-            // let owned_pipeline = new_pipeline.clone().to_owned();
-
-            // let layout = owned_pipeline.layout().set_layouts().get(0).unwrap();
-
-            // let set = PersistentDescriptorSet::new(
-            //     layout.clone(),
-            //     [WriteDescriptorSet::buffer(0, uniform_buffer_subbuffer)],
-            // )
-            // .unwrap();
 
             let command_buffers = get_command_buffers(
                 device.clone(),
@@ -832,14 +615,14 @@ fn main() {
                 match vulkano::swapchain::acquire_next_image(swapchain.clone(), None) {
                     Ok(r) => r,
                     Err(AcquireError::OutOfDate) => {
-                        recreate_swapchain = true;
+                        recreate_swapchain_b = true;
                         return;
                     }
                     Err(e) => panic!("Failed to acquire next image: {:?}", e),
                 };
 
             if suboptimal {
-                recreate_swapchain = true;
+                recreate_swapchain_b = true;
             }
 
             if let Some(image_fence) = &fences[image_i] {
@@ -868,7 +651,7 @@ fn main() {
             fences[image_i] = match future {
                 Ok(value) => Some(Arc::new(value)),
                 Err(FlushError::OutOfDate) => {
-                    recreate_swapchain = true;
+                    recreate_swapchain_b = true;
                     None
                 }
                 Err(e) => {

@@ -7,7 +7,7 @@ layout(location = 0) out vec3 out_normal;
 layout(location = 1) out vec3 out_colour;
 
 
-layout(set = 0, binding = 0) uniform MVP_Data {
+layout(set = 0, binding = 0) uniform MvpData {
     mat4 model;
     mat4 view;
     mat4 proj;
