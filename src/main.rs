@@ -40,6 +40,37 @@ use vertex::Vertex;
 
 const BG_COL: [f32; 4] = [0.40, 0.40, 0.40, 1.0];
 
+#[repr(C)]
+#[derive(Default, Clone)]
+struct Light {
+    position: [f32; 3],
+    colour: [f32; 3],
+    intensity: f32,
+}
+
+impl Light {
+    fn new(position: [f32; 3], colour: [f32; 3], intensity: f32) -> Self {
+        Self {
+            position,
+            colour,
+            intensity,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Default, Clone)]
+struct Camera {
+    position: [f32; 3],
+    dt: u32,
+}
+
+impl Camera {
+    fn new(position: [f32; 3], dt: u32) -> Self {
+        Self { position, dt }
+    }
+}
+
 mod deferred_vert {
     vulkano_shaders::shader! {
         ty: "vertex",
@@ -75,11 +106,11 @@ mod lighting_frag {
     vulkano_shaders::shader! {
         ty: "fragment",
         path: "src/shaders/lighting.frag.glsl",
-        // types_meta: {
-        //     use bytemuck::{Pod, Zeroable};
+        types_meta: {
+            use bytemuck::{Pod, Zeroable};
 
-        //     #[derive(Clone, Copy, Zeroable, Pod)]
-        // },
+            #[derive(Clone, Copy, Zeroable, Pod)]
+        },
     }
 }
 
@@ -468,6 +499,10 @@ fn main() {
     let lighting_frag = lighting_frag::load(device.clone()).unwrap();
 
     let mvp_buffer = CpuBufferPool::<deferred_vert::ty::MvpData>::uniform_buffer(device.clone());
+    let lighting_buffer =
+        CpuBufferPool::<lighting_frag::ty::LightData>::uniform_buffer(device.clone());
+    let camera_buffer =
+        CpuBufferPool::<lighting_frag::ty::CameraData>::uniform_buffer(device.clone());
 
     let mut viewport = Viewport {
         origin: [0.0, 0.0],
@@ -561,7 +596,7 @@ fn main() {
             );
 
             let mvp_buffer_subbuffer = {
-                let mvp = mvp::get_mvp(dimensions, time.elapsed());
+                let mvp = mvp::get_mvp(dimensions, time.clone());
                 let mvp_data = deferred_vert::ty::MvpData {
                     model: mvp.model.into(),
                     view: mvp.view.into(),
@@ -569,6 +604,31 @@ fn main() {
                 };
 
                 mvp_buffer.next(mvp_data).unwrap()
+            };
+
+            let lighting_buffer_subbuffer = {
+                let light = Light::new([0.0, 0.0, -1.0], [1.0, 1.0, 1.0], 1.0);
+                let light_data = lighting_frag::ty::LightData {
+                    _dummy0: [0; 4],
+                    position: light.position.into(),
+                    colour: light.colour.into(),
+                    intensity: light.intensity.into(),
+                };
+
+                lighting_buffer.next(light_data).unwrap()
+            };
+
+            let camera_buffer_subbuffer = {
+                let camera = Camera::new(
+                    [0.0, 0.0, 0.0],
+                    time.elapsed().as_secs().try_into().unwrap(),
+                );
+                let camera_data = lighting_frag::ty::CameraData {
+                    position: camera.position.into(),
+                    dt: camera.dt.into(),
+                };
+
+                camera_buffer.next(camera_data).unwrap()
             };
 
             let deferred_layout = deferred_pipeline
@@ -594,7 +654,9 @@ fn main() {
                 [
                     WriteDescriptorSet::image_view(0, normal_buffer.clone()),
                     WriteDescriptorSet::image_view(1, colour_buffer.clone()),
-                    WriteDescriptorSet::buffer(2, mvp_buffer_subbuffer.clone()),
+                    WriteDescriptorSet::buffer(2, mvp_buffer_subbuffer),
+                    WriteDescriptorSet::buffer(3, lighting_buffer_subbuffer),
+                    WriteDescriptorSet::buffer(4, camera_buffer_subbuffer),
                 ],
             )
             .unwrap();

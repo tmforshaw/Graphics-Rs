@@ -1,6 +1,6 @@
 use nalgebra_glm::{identity, TMat4, TVec3};
 
-use std::time::Duration;
+use std::time::Instant;
 
 #[derive(Default, Clone)]
 pub struct MVP {
@@ -20,13 +20,17 @@ impl MVP {
     }
 }
 
-pub fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> MVP {
+pub fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, time: Instant) -> MVP {
     let rotation = nalgebra_glm::rotation(
-        dt.as_millis() as f32 * 0.002,
+        time.elapsed().as_secs_f32() * 2f32,
         &TVec3::new(0.5f32, -0.5f32, 0.5f32),
     );
 
-    let model: TMat4<f32> = nalgebra_glm::translation(&TVec3::new(0f32, 0f32, 1f32)) * rotation;
+    let model: TMat4<f32> = nalgebra_glm::translation(&TVec3::new(
+        0f32,
+        0f32,
+        1.25f32 + (time.elapsed().as_secs_f32() * 2f32).sin(),
+    )) * rotation;
     let view = nalgebra_glm::look_at_rh(
         &TVec3::new(0f32, 0f32, -1f32),
         &TVec3::new(0f32, 0f32, 1f32),
@@ -35,7 +39,7 @@ pub fn get_mvp(dimensions: winit::dpi::PhysicalSize<u32>, dt: Duration) -> MVP {
 
     let proj = nalgebra_glm::perspective(
         (dimensions.width as f32) / (dimensions.height as f32),
-        ((dt.as_secs_f32() * 0.8f32).sin()).abs() + 80f32,
+        90f32,
         0.05f32,
         100f32,
     );
