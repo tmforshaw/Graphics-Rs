@@ -1,18 +1,13 @@
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer, CpuBufferPool};
 use vulkano::descriptor_set::{PersistentDescriptorSet, WriteDescriptorSet};
-use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, QueueCreateInfo};
 use vulkano::format::Format;
-use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::pipeline::{graphics::viewport::Viewport, Pipeline};
 use vulkano::render_pass::Subpass;
 use vulkano::swapchain::AcquireError;
 use vulkano::sync::{self, FenceSignalFuture, FlushError, GpuFuture};
 
-use vulkano_win::VkSurfaceBuild;
-
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::window::WindowBuilder;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,45 +26,18 @@ use camera::Camera;
 use light::Light;
 use model::{Model, ModelCollection};
 use pipeline_commands::{
-    get_command_buffers, get_framebuffers, get_pipeline, get_pipeline_with_depth, get_render_pass,
-    new_attachment_image, new_swapchain_images, recreate_swapchain, select_physical_device,
+    create_instance, get_command_buffers, get_devices_surface_queue, get_framebuffers,
+    get_pipeline, get_pipeline_with_depth, get_render_pass, new_attachment_image,
+    new_swapchain_images, recreate_swapchain,
 };
 use shader::{deferred_frag, deferred_vert, lighting_frag, lighting_vert};
 
 fn main() {
-    let required_extensions = vulkano_win::required_extensions();
-    let instance = Instance::new(InstanceCreateInfo {
-        enabled_extensions: required_extensions,
-        ..Default::default()
-    })
-    .expect("failed to create instance");
+    let event_loop = EventLoop::new();
 
-    let event_loop = EventLoop::new(); // ignore this for now
-    let surface = WindowBuilder::new()
-        .build_vk_surface(&event_loop, instance.clone())
-        .unwrap();
-
-    let device_extensions = DeviceExtensions {
-        khr_swapchain: true,
-        ..DeviceExtensions::none()
-    };
-
-    let (physical_device, queue_family) =
-        select_physical_device(&instance, surface.clone(), &device_extensions);
-
-    let (device, mut queues) = Device::new(
-        physical_device,
-        DeviceCreateInfo {
-            queue_create_infos: vec![QueueCreateInfo::family(queue_family)],
-            enabled_extensions: physical_device
-                .required_extensions()
-                .union(&device_extensions), // new
-            ..Default::default()
-        },
-    )
-    .expect("failed to create device");
-
-    let queue = queues.next().unwrap();
+    let instance = create_instance();
+    let (physical_device, device, queue, surface) =
+        get_devices_surface_queue(&event_loop, &instance);
 
     let (mut swapchain, images, mut dimensions) =
         new_swapchain_images(device.clone(), physical_device, &surface);
@@ -216,12 +184,15 @@ fn main() {
 
             let lighting_buffer_subbuffer = {
                 let light = Light::new(
+                    // Position
                     [0.0, 0.0, -1.0],
+                    // Colour
                     [
                         ((time.elapsed().as_secs_f32() * 3f32).sin() + 1.0) * 0.5,
                         ((time.elapsed().as_secs_f32()).cos() + 1.0) * 0.,
                         1.0,
                     ],
+                    // Intensity
                     1.0,
                 );
                 let light_data = lighting_frag::ty::LightData {

@@ -4,10 +4,10 @@ use vulkano::command_buffer::{
 };
 use vulkano::descriptor_set::PersistentDescriptorSet;
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType, QueueFamily};
-use vulkano::device::{Device, DeviceExtensions, Queue};
+use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
 use vulkano::format::Format;
 use vulkano::image::{view::ImageView, AttachmentImage, ImageUsage, SwapchainImage};
-use vulkano::instance::Instance;
+use vulkano::instance::{Instance, InstanceCreateInfo};
 use vulkano::pipeline::graphics::depth_stencil::DepthStencilState;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
@@ -18,38 +18,21 @@ use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpa
 use vulkano::shader::ShaderModule;
 use vulkano::swapchain::{Surface, Swapchain, SwapchainCreateInfo, SwapchainCreationError};
 
-use winit::window::Window;
+use vulkano_win::VkSurfaceBuild;
 
-use crate::vertex::{Index, Vertex};
+use winit::event_loop::EventLoop;
+use winit::window::{Window, WindowBuilder};
 
 use std::sync::Arc;
 
-pub fn get_framebuffers(
-    images: &[Arc<SwapchainImage<Window>>],
-    render_pass: Arc<RenderPass>,
-    colour_buffer: Arc<ImageView<AttachmentImage>>,
-    normal_buffer: Arc<ImageView<AttachmentImage>>,
-    depth_buffer: Arc<ImageView<AttachmentImage>>,
-) -> Vec<Arc<Framebuffer>> {
-    images
-        .iter()
-        .map(|image| {
-            let view = ImageView::new_default(image.clone()).unwrap();
-            Framebuffer::new(
-                render_pass.clone(),
-                FramebufferCreateInfo {
-                    attachments: vec![
-                        view,
-                        normal_buffer.clone(),
-                        colour_buffer.clone(),
-                        depth_buffer.clone(),
-                    ],
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-        })
-        .collect::<Vec<_>>()
+use crate::vertex::{Index, Vertex};
+
+pub fn create_instance() -> Arc<Instance> {
+    Instance::new(InstanceCreateInfo {
+        enabled_extensions: vulkano_win::required_extensions(),
+        ..Default::default()
+    })
+    .expect("failed to create instance")
 }
 
 pub fn select_physical_device<'a>(
@@ -74,6 +57,87 @@ pub fn select_physical_device<'a>(
         .expect("no device available");
 
     (physical_device, queue_family)
+}
+
+pub fn get_devices_surface_queue<'a>(
+    event_loop: &EventLoop<()>,
+    instance: &'a Arc<Instance>,
+) -> (
+    PhysicalDevice<'a>,
+    Arc<Device>,
+    Arc<Queue>,
+    Arc<Surface<Window>>,
+) {
+    let surface = WindowBuilder::new()
+        .build_vk_surface(&event_loop, instance.clone())
+        .unwrap();
+
+    let device_extensions = DeviceExtensions {
+        khr_swapchain: true,
+        ..DeviceExtensions::none()
+    };
+
+    let (physical_device, queue_family) =
+        select_physical_device(&instance, surface.clone(), &device_extensions);
+
+    let (device, mut queues) = Device::new(
+        physical_device,
+        DeviceCreateInfo {
+            queue_create_infos: vec![QueueCreateInfo::family(queue_family)],
+            enabled_extensions: physical_device
+                .required_extensions()
+                .union(&device_extensions), // new
+            ..Default::default()
+        },
+    )
+    .expect("failed to create device");
+
+    let queue = queues.next().unwrap();
+
+    (physical_device, device, queue, surface)
+}
+
+pub fn new_swapchain_images(
+    device: Arc<Device>,
+    physical_device: PhysicalDevice,
+    surface: &Arc<Surface<Window>>,
+) -> (
+    Arc<Swapchain<Window>>,
+    Vec<Arc<SwapchainImage<Window>>>,
+    winit::dpi::PhysicalSize<u32>,
+) {
+    let capabilities = physical_device
+        .surface_capabilities(&surface, Default::default())
+        .expect("failed to get surface capabilities");
+
+    let dimensions = surface.window().inner_size();
+    let composite_alpha = capabilities
+        .supported_composite_alpha
+        .iter()
+        .next()
+        .unwrap();
+    let image_format = Some(
+        physical_device
+            .surface_formats(&surface, Default::default())
+            .unwrap()[0]
+            .0,
+    );
+
+    let (swapchain, images) = Swapchain::new(
+        device.clone(),
+        surface.clone(),
+        SwapchainCreateInfo {
+            min_image_count: capabilities.min_image_count + 1, // How many buffers to use in the swapchain
+            image_format,
+            image_extent: dimensions.into(),
+            image_usage: ImageUsage::color_attachment(), // What the images are going to be used for
+            composite_alpha,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    (swapchain, images, dimensions)
 }
 
 pub fn get_render_pass(device: Arc<Device>, swapchain: Arc<Swapchain<Window>>) -> Arc<RenderPass> {
@@ -120,6 +184,98 @@ pub fn get_render_pass(device: Arc<Device>, swapchain: Arc<Swapchain<Window>>) -
         ]
     )
     .unwrap()
+}
+
+pub fn new_attachment_image(
+    device: Arc<Device>,
+    dimensions: winit::dpi::PhysicalSize<u32>,
+    format: Format,
+) -> Arc<ImageView<AttachmentImage>> {
+    ImageView::new_default(
+        AttachmentImage::transient_input_attachment(
+            device.clone(),
+            dimensions.clone().into(),
+            format,
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+pub fn get_framebuffers(
+    images: &[Arc<SwapchainImage<Window>>],
+    render_pass: Arc<RenderPass>,
+    colour_buffer: Arc<ImageView<AttachmentImage>>,
+    normal_buffer: Arc<ImageView<AttachmentImage>>,
+    depth_buffer: Arc<ImageView<AttachmentImage>>,
+) -> Vec<Arc<Framebuffer>> {
+    images
+        .iter()
+        .map(|image| {
+            let view = ImageView::new_default(image.clone()).unwrap();
+            Framebuffer::new(
+                render_pass.clone(),
+                FramebufferCreateInfo {
+                    attachments: vec![
+                        view,
+                        normal_buffer.clone(),
+                        colour_buffer.clone(),
+                        depth_buffer.clone(),
+                    ],
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>()
+}
+
+pub fn recreate_swapchain(
+    dimensions: winit::dpi::PhysicalSize<u32>,
+    device: Arc<Device>,
+    swapchain: Arc<Swapchain<Window>>,
+) -> Option<(
+    Arc<Swapchain<Window>>,
+    winit::dpi::PhysicalSize<u32>,
+    Vec<Arc<Framebuffer>>,
+    Arc<RenderPass>,
+    Arc<ImageView<AttachmentImage>>,
+    Arc<ImageView<AttachmentImage>>,
+)> {
+    // Recreate attachment image buffers
+    let depth_buffer = new_attachment_image(device.clone(), dimensions, Format::D16_UNORM);
+    let normal_buffer =
+        new_attachment_image(device.clone(), dimensions, Format::R16G16B16A16_SFLOAT);
+    let colour_buffer =
+        new_attachment_image(device.clone(), dimensions, Format::A2B10G10R10_UNORM_PACK32);
+
+    let (new_swapchain, images) = match swapchain.recreate(SwapchainCreateInfo {
+        image_extent: dimensions.into(),
+        ..swapchain.create_info()
+    }) {
+        Ok(r) => r,
+        Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return Option::None,
+        Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
+    };
+
+    let render_pass = get_render_pass(device, swapchain);
+
+    let framebuffers = get_framebuffers(
+        &images,
+        render_pass.clone(),
+        colour_buffer.clone(),
+        normal_buffer.clone(),
+        depth_buffer.clone(),
+    );
+
+    Option::from((
+        new_swapchain,
+        dimensions,
+        framebuffers,
+        render_pass,
+        normal_buffer,
+        colour_buffer,
+    ))
 }
 
 pub fn get_pipeline(
@@ -219,111 +375,4 @@ pub fn get_command_buffers(
             Arc::new(builder.build().unwrap())
         })
         .collect()
-}
-
-pub fn new_attachment_image(
-    device: Arc<Device>,
-    dimensions: winit::dpi::PhysicalSize<u32>,
-    format: Format,
-) -> Arc<ImageView<AttachmentImage>> {
-    ImageView::new_default(
-        AttachmentImage::transient_input_attachment(
-            device.clone(),
-            dimensions.clone().into(),
-            format,
-        )
-        .unwrap(),
-    )
-    .unwrap()
-}
-
-pub fn recreate_swapchain(
-    dimensions: winit::dpi::PhysicalSize<u32>,
-    device: Arc<Device>,
-    swapchain: Arc<Swapchain<Window>>,
-) -> Option<(
-    Arc<Swapchain<Window>>,
-    winit::dpi::PhysicalSize<u32>,
-    Vec<Arc<Framebuffer>>,
-    Arc<RenderPass>,
-    Arc<ImageView<AttachmentImage>>,
-    Arc<ImageView<AttachmentImage>>,
-)> {
-    // Recreate attachment image buffers
-    let depth_buffer = new_attachment_image(device.clone(), dimensions, Format::D16_UNORM);
-    let normal_buffer =
-        new_attachment_image(device.clone(), dimensions, Format::R16G16B16A16_SFLOAT);
-    let colour_buffer =
-        new_attachment_image(device.clone(), dimensions, Format::A2B10G10R10_UNORM_PACK32);
-
-    let (new_swapchain, images) = match swapchain.recreate(SwapchainCreateInfo {
-        image_extent: dimensions.into(),
-        ..swapchain.create_info()
-    }) {
-        Ok(r) => r,
-        Err(SwapchainCreationError::ImageExtentNotSupported { .. }) => return Option::None,
-        Err(e) => panic!("Failed to recreate swapchain: {:?}", e),
-    };
-
-    let render_pass = get_render_pass(device, swapchain);
-
-    let framebuffers = get_framebuffers(
-        &images,
-        render_pass.clone(),
-        colour_buffer.clone(),
-        normal_buffer.clone(),
-        depth_buffer.clone(),
-    );
-
-    Option::from((
-        new_swapchain,
-        dimensions,
-        framebuffers,
-        render_pass,
-        normal_buffer,
-        colour_buffer,
-    ))
-}
-
-pub fn new_swapchain_images(
-    device: Arc<Device>,
-    physical_device: PhysicalDevice,
-    surface: &Arc<Surface<Window>>,
-) -> (
-    Arc<Swapchain<Window>>,
-    Vec<Arc<SwapchainImage<Window>>>,
-    winit::dpi::PhysicalSize<u32>,
-) {
-    let capabilities = physical_device
-        .surface_capabilities(&surface, Default::default())
-        .expect("failed to get surface capabilities");
-
-    let dimensions = surface.window().inner_size();
-    let composite_alpha = capabilities
-        .supported_composite_alpha
-        .iter()
-        .next()
-        .unwrap();
-    let image_format = Some(
-        physical_device
-            .surface_formats(&surface, Default::default())
-            .unwrap()[0]
-            .0,
-    );
-
-    let (swapchain, images) = Swapchain::new(
-        device.clone(),
-        surface.clone(),
-        SwapchainCreateInfo {
-            min_image_count: capabilities.min_image_count + 1, // How many buffers to use in the swapchain
-            image_format,
-            image_extent: dimensions.into(),
-            image_usage: ImageUsage::color_attachment(), // What the images are going to be used for
-            composite_alpha,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-
-    (swapchain, images, dimensions)
 }
