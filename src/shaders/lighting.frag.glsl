@@ -32,10 +32,10 @@ void main() {
     vec3 lightDir = normalize(light.position - frag_pos);
     vec3 viewDir = normalize(camera.position - frag_pos);
     vec3 reflectDir = reflect(-lightDir, normals);
-    
-    vec3 ambient = vec3(0.1);
+        
+    vec3 ambient = vec3(0.2);
     vec3 diffuse = max(dot(normals, lightDir), 0.0) * light.colour * light.intensity; // * abs(vec3(sin(camera.dt * 0.05), cos(camera.dt * 0.1), sin(camera.dt * 0.2)));
-    vec3 specular = pow(max(dot(viewDir, reflectDir), 0.0), 64) * 0.5 *  light.colour * light.intensity;
+    vec3 specular = pow(max(dot(viewDir, reflectDir), 0.0), 16) * 0.9 * light.colour * light.intensity;
     
     f_colour = vec4((ambient + diffuse + specular) * colour, 1.0);
 }

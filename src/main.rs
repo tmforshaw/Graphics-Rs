@@ -33,12 +33,14 @@ use std::sync::Arc;
 
 use std::time::Instant;
 
-mod mvp;
-mod vertex;
+mod model;
+pub mod vertex;
+mod vp;
 
-use vertex::Vertex;
+use model::{Model, ModelCollection};
+use vertex::{Index, Vertex};
 
-const BG_COL: [f32; 4] = [0.40, 0.40, 0.40, 1.0];
+const BG_COL: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 #[repr(C)]
 #[derive(Default, Clone)]
@@ -260,7 +262,7 @@ fn get_command_buffers(
     lighting_set: Arc<PersistentDescriptorSet>,
     framebuffers: &Vec<Arc<Framebuffer>>,
     vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
-    index_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
+    index_buffer: Arc<CpuAccessibleBuffer<[Index]>>,
 ) -> Vec<Arc<PrimaryAutoCommandBuffer>> {
     framebuffers
         .iter()
@@ -307,24 +309,6 @@ fn get_command_buffers(
             Arc::new(builder.build().unwrap())
         })
         .collect()
-}
-
-fn make_square_indices(vertices: &Vec<Vertex>) -> Vec<u32> {
-    assert_eq!(vertices.len() % 4, 0);
-
-    let mut indices: Vec<u32> = Vec::new();
-
-    for i in 0..vertices.len() / 4 {
-        for j in 0..6 {
-            if j < 4 {
-                indices.push((i * 4 + j) as u32);
-            } else {
-                indices.push((i * 4 + 5 - j) as u32);
-            }
-        }
-    }
-
-    indices
 }
 
 fn new_attachment_image(
@@ -489,16 +473,20 @@ fn main() {
         depth_buffer.clone(),
     );
 
-    let vertices = vertex::CUBE_VERTICES.clone().to_vec();
+    // let vertices = vertex::CUBE_VERTICES.clone().to_vec();
 
-    let indices = make_square_indices(&vertices.clone());
+    // let indices = make_square_indices(&vertices.clone());
+
+    let cube = Model::new_cube(vertex::CUBE_VERTICES.clone().to_vec());
+
+    let model_vec = vec![cube.clone(), cube.clone()];
 
     let deferred_vert = deferred_vert::load(device.clone()).unwrap();
     let deferred_frag = deferred_frag::load(device.clone()).unwrap();
     let lighting_vert = lighting_vert::load(device.clone()).unwrap();
     let lighting_frag = lighting_frag::load(device.clone()).unwrap();
 
-    let mvp_buffer = CpuBufferPool::<deferred_vert::ty::MvpData>::uniform_buffer(device.clone());
+    let vp_buffer = CpuBufferPool::<deferred_vert::ty::VpData>::uniform_buffer(device.clone());
     let lighting_buffer =
         CpuBufferPool::<lighting_frag::ty::LightData>::uniform_buffer(device.clone());
     let camera_buffer =
@@ -558,11 +546,18 @@ fn main() {
                 }
             };
 
+            let mut model_vec_clone = model_vec.clone();
+
+            model_vec_clone[0].set_matrix(vp::get_model(time.clone()));
+            model_vec_clone[1].set_matrix(vp::get_model_2(time.clone()));
+
+            let models = ModelCollection::from_vec(model_vec_clone.clone());
+
             let vertex_buffer_e = CpuAccessibleBuffer::from_iter(
                 device.clone(),
                 BufferUsage::vertex_buffer(),
                 false,
-                vertices.clone().into_iter(),
+                models.vertices().into_iter(),
             )
             .unwrap();
 
@@ -570,7 +565,7 @@ fn main() {
                 device.clone(),
                 BufferUsage::index_buffer(),
                 false,
-                indices.clone().into_iter(),
+                models.indices().into_iter(),
             )
             .unwrap();
 
@@ -595,19 +590,27 @@ fn main() {
                 viewport.clone(),
             );
 
-            let mvp_buffer_subbuffer = {
-                let mvp = mvp::get_mvp(dimensions, time.clone());
-                let mvp_data = deferred_vert::ty::MvpData {
-                    model: mvp.model.into(),
-                    view: mvp.view.into(),
-                    proj: mvp.proj.into(),
+            let vp_buffer_subbuffer = {
+                let vp = vp::get_vp(dimensions);
+                let vp_data = deferred_vert::ty::VpData {
+                    // model: mvp.model.into(),
+                    view: vp.view.into(),
+                    proj: vp.proj.into(),
                 };
 
-                mvp_buffer.next(mvp_data).unwrap()
+                vp_buffer.next(vp_data).unwrap()
             };
 
             let lighting_buffer_subbuffer = {
-                let light = Light::new([0.0, 0.0, -1.0], [1.0, 1.0, 1.0], 1.0);
+                let light = Light::new(
+                    [0.0, 0.0, -1.0],
+                    [
+                        ((time.elapsed().as_secs_f32() * 3f32).sin() + 1.0) * 0.5,
+                        ((time.elapsed().as_secs_f32()).cos() + 1.0) * 0.,
+                        1.0,
+                    ],
+                    1.0,
+                );
                 let light_data = lighting_frag::ty::LightData {
                     _dummy0: [0; 4],
                     position: light.position.into(),
@@ -639,7 +642,7 @@ fn main() {
                 .unwrap();
             let deferred_set = PersistentDescriptorSet::new(
                 deferred_layout.clone(),
-                [WriteDescriptorSet::buffer(0, mvp_buffer_subbuffer.clone())],
+                [WriteDescriptorSet::buffer(0, vp_buffer_subbuffer.clone())],
             )
             .unwrap();
 
@@ -654,7 +657,7 @@ fn main() {
                 [
                     WriteDescriptorSet::image_view(0, normal_buffer.clone()),
                     WriteDescriptorSet::image_view(1, colour_buffer.clone()),
-                    WriteDescriptorSet::buffer(2, mvp_buffer_subbuffer),
+                    WriteDescriptorSet::buffer(2, vp_buffer_subbuffer),
                     WriteDescriptorSet::buffer(3, lighting_buffer_subbuffer),
                     WriteDescriptorSet::buffer(4, camera_buffer_subbuffer),
                 ],
