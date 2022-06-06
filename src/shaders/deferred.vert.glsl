@@ -12,7 +12,7 @@ layout(set = 0, binding = 0) uniform VpData {
 } vp;
 
 void main() {
-    out_colour = vec3(1.0); //vec3(0.75, 0.1, 0.2);
+    out_colour = vec3(1.0);
     out_normal = normal;
 
     gl_Position = vp.proj * vp.view * vec4(position, 1.0);

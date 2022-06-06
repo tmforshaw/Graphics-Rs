@@ -6,7 +6,6 @@ const PI: f32 = 3.1415926535f32;
 
 #[derive(Default, Clone)]
 pub struct VP {
-    // pub model: TMat4<f32>,
     pub view: TMat4<f32>,
     pub proj: TMat4<f32>,
 }
@@ -15,7 +14,6 @@ pub struct VP {
 impl VP {
     pub fn new() -> Self {
         Self {
-            // model: identity(),
             view: identity(),
             proj: identity(),
         }

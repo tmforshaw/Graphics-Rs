@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 
-type CompactVec3 = [f32; 3];
+pub type CompactVec3 = [f32; 3];
 pub type Index = u32;
 
 #[repr(C)]

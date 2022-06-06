@@ -89,41 +89,6 @@ impl ModelCollection {
                 .map(|&mut i| i + vertices.len() as Index)
                 .collect();
 
-            // let model_vertices: Vec<Vertex> = Vec::new();
-
-            // for v in models[i].vertices().iter() {
-            //     let new_vertex_position = models[i].matrix().transform_vector(&TVec3::<f32>::new(
-            //         v.position[0],
-            //         v.position[1],
-            //         v.position[2],
-            //     ));
-
-            //     let new_vertex_normals = models[i].matrix().transform_vector(&TVec3::<f32>::new(
-            //         v.normal[0],
-            //         v.normal[1],
-            //         v.normal[2],
-            //     ));
-
-            //     model_vertices.push(Vertex::new(
-            //         [
-            //             new_vertex_position.x,
-            //             new_vertex_position.y,
-            //             new_vertex_position.z,
-            //         ],
-            //         [
-            //             new_vertex_normals.x,
-            //             new_vertex_normals.y,
-            //             new_vertex_normals.z,
-            //         ],
-            //     ));
-            // }
-
-            // let mut model_indices: Vec<Index> = Vec::new();
-
-            // for i in models[i].indices().iter() {
-            //     model_indices.push(i + vertices.len() as Index);
-            // }
-
             vertices.append(&mut model_vertices);
             indices.append(&mut model_indices);
         }
